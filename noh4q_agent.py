@@ -61,15 +61,19 @@ db = DB()
 def ai_ask(prompt):
     if GEMINI_KEY:
         try:
+            # UPDATED: Using gemini-2.5-flash as confirmed by your browser test
             r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
                 json={"contents": [{"parts": [{"text": prompt}]}]},
                 timeout=30
             )
             if r.status_code == 200:
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                # NEW: Log the exact error from Google so we can debug it
+                logger.error(f"Gemini API Error: {r.status_code} - {r.text}")
         except Exception as e:
-            logger.warning(f"Gemini failed: {e}")
+            logger.warning(f"Gemini request failed: {e}")
     return "AI unavailable - fallback mode"
 
 # ============================================
