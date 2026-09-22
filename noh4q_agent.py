@@ -178,20 +178,16 @@ def api_status():
     })
 
 # ============================================
-# START EVERYTHING
+# START BACKGROUND TASKS (Runs with Gunicorn)
+# ============================================
+logger.info("🚀 NOH4Q starting background tasks...")
+threading.Thread(target=tg_poll, daemon=True).start()
+threading.Thread(target=work_loop, daemon=True).start()
+logger.info("✅ Telegram listener started. Waiting for messages...")
+
+# ============================================
+# MAIN ENTRY (For local testing only)
 # ============================================
 if __name__ == "__main__":
-    logger.info("🚀 NOH4Q starting...")
-
-    # Start Telegram listener
-    threading.Thread(target=tg_poll, daemon=True).start()
-
-    # Start work loop
-    threading.Thread(target=work_loop, daemon=True).start()
-
-    # Telegram boot message
-    tg_send("🚀 NOH4Q Agent started. Type /status to check.")
-
-    # Start web server
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
