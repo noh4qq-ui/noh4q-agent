@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 2
+NOH4Q AGENT - PHASE 2 (Fixed)
 Runs 24/7 on Render, controlled via Telegram
-Now with: Live Market Data + Content Generation
 """
 
 import os
@@ -83,7 +82,15 @@ def ai_ask(prompt):
         try:
             r = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}",
-                json={"contents": [{"parts": [{"text": prompt}]}]},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "safetySettings": [
+                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+                    ]
+                },
                 timeout=60
             )
             if r.status_code == 200:
@@ -95,23 +102,28 @@ def ai_ask(prompt):
     return "AI unavailable - fallback mode"
 
 # ============================================
-# MARKET DATA (Binance - No API Key Required)
+# MARKET DATA (CoinGecko - No Geo-Block, No API Key)
 # ============================================
-def get_crypto_price(symbol="BTCUSDT"):
-    """Fetch live price from Binance public API."""
+def get_crypto_price(symbol="BTC"):
+    """Fetch live price from CoinGecko public API."""
+    mapping = {
+        "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
+        "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "DOGE": "dogecoin"
+    }
+    coin_id = mapping.get(symbol.upper(), "bitcoin")
     try:
         r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": symbol.upper()},
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": coin_id, "vs_currencies": "usd"},
             timeout=10
         )
         if r.status_code == 200:
             data = r.json()
-            price = float(data["price"])
+            price = data[coin_id]["usd"]
             db.save_price(symbol.upper(), price)
             return {"symbol": symbol.upper(), "price": price}
         else:
-            return {"error": f"Binance returned {r.status_code}"}
+            return {"error": f"CoinGecko returned {r.status_code}"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -121,9 +133,9 @@ def get_crypto_price(symbol="BTCUSDT"):
 def generate_content(topic, content_type="article"):
     """Generate full-length content using AI."""
     prompts = {
-        "article": f"Write a 500-word informative article about: {topic}. Include a title, introduction, 3 main points, and a conclusion.",
-        "tweet_thread": f"Write a 5-tweet thread about: {topic}. Each tweet should be under 280 characters. Number them 1/5, 2/5, etc.",
-        "script": f"Write a 60-second video script about: {topic}. Include a hook, main content, and call to action.",
+        "article": f"Write a 300-word informative article about: {topic}. Keep it safe and educational.",
+        "tweet_thread": f"Write a 3-tweet thread about: {topic}. Each tweet should be under 280 characters. Number them 1/3, 2/3, etc.",
+        "script": f"Write a 30-second video script about: {topic}. Include a hook, main content, and call to action.",
         "post": f"Write an engaging social media post about: {topic}. Include hashtags and a call to action."
     }
     prompt = prompts.get(content_type, prompts["article"])
@@ -173,7 +185,7 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v2 online.\nTotal earned: ${db.total():.2f}\n\nNew commands:\n/price BTCUSDT\n/content blockchain article\n/history BTCUSDT")
+        tg_send(f"🤖 NOH4Q Agent v2 online.\nTotal earned: ${db.total():.2f}\n\nNew commands:\n/price BTC\n/content blockchain article\n/history BTC")
 
     elif text == "/status":
         tg_send(f"✅ Agent running.\nEarned: ${db.total():.2f}\nTime: {datetime.now().isoformat()}")
@@ -202,7 +214,10 @@ def handle_command(text, chat_id):
             ctype = parts[-1]
             tg_send(f"🧠 Generating {ctype} about '{topic}'...")
             result = generate_content(topic, ctype)
-            tg_send(f"✅ Saved!\n\n{result['body'][:500]}...")
+            if "AI unavailable" in result['body']:
+                tg_send("❌ AI failed to generate content. Check Render logs.")
+            else:
+                tg_send(f"✅ Saved!\n\n{result['body'][:500]}...")
 
     elif text.startswith("/history "):
         symbol = text[9:].strip().upper()
@@ -228,7 +243,7 @@ def work_loop():
     while True:
         try:
             # 1. Track BTC price every hour
-            price = get_crypto_price("BTCUSDT")
+            price = get_crypto_price("BTC")
             if "price" in price:
                 logger.info(f"BTC: ${price['price']:,.2f}")
 
@@ -237,8 +252,8 @@ def work_loop():
             db.log("ai", idea)
             logger.info(f"AI idea: {idea}")
 
-            # 3. Auto-generate one piece of content
-            topics = ["crypto trading", "AI automation", "passive income", "freelancing tips"]
+            # 3. Auto-generate one piece of content (shortened prompt for reliability)
+            topics = ["crypto trading", "AI automation", "passive income"]
             topic = random.choice(topics)
             generate_content(topic, "post")
             logger.info(f"Generated content about: {topic}")
