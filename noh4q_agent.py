@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 2 (Fixed)
+NOH4Q AGENT - PHASE 2 (Robust)
 Runs 24/7 on Render, controlled via Telegram
 """
 
@@ -75,10 +75,13 @@ class DB:
 db = DB()
 
 # ============================================
-# AI BRAIN (Gemini)
+# AI BRAIN (Gemini with Retry)
 # ============================================
-def ai_ask(prompt):
-    if GEMINI_KEY:
+def ai_ask(prompt, retries=3):
+    if not GEMINI_KEY:
+        return "AI unavailable - fallback mode"
+    
+    for attempt in range(retries):
         try:
             r = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}",
@@ -95,48 +98,65 @@ def ai_ask(prompt):
             )
             if r.status_code == 200:
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            elif r.status_code == 503:
+                logger.warning(f"Gemini 503 (busy). Retry {attempt+1}/{retries} in 5s...")
+                time.sleep(5)
             else:
                 logger.error(f"Gemini API Error: {r.status_code} - {r.text}")
+                break # Don't retry 400/404 errors
         except Exception as e:
             logger.warning(f"Gemini request failed: {e}")
+            time.sleep(2)
+            
     return "AI unavailable - fallback mode"
 
 # ============================================
-# MARKET DATA (CoinGecko - No Geo-Block, No API Key)
+# MARKET DATA (CryptoCompare - Reliable)
 # ============================================
 def get_crypto_price(symbol="BTC"):
-    """Fetch live price from CoinGecko public API."""
-    mapping = {
-        "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
-        "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "DOGE": "dogecoin"
-    }
-    coin_id = mapping.get(symbol.upper(), "bitcoin")
+    crypto_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "DOGE": "DOGE", 
+                  "BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL"}
+    fsym = crypto_map.get(symbol.upper(), "BTC")
+    
+    # Primary: CryptoCompare
     try:
+        r = requests.get(
+            f"https://min-api.cryptocompare.com/data/price?fsym={fsym}&tsyms=USD",
+            timeout=10
+        )
+        if r.status_code == 200:
+            price = r.json()["USD"]
+            db.save_price(symbol.upper(), price)
+            return {"symbol": symbol.upper(), "price": price}
+    except Exception as e:
+        logger.warning(f"CryptoCompare failed: {e}")
+
+    # Fallback: CoinGecko
+    try:
+        coin_id = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "DOGE": "dogecoin"}.get(fsym, "bitcoin")
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
             params={"ids": coin_id, "vs_currencies": "usd"},
             timeout=10
         )
         if r.status_code == 200:
-            data = r.json()
-            price = data[coin_id]["usd"]
+            price = r.json()[coin_id]["usd"]
             db.save_price(symbol.upper(), price)
             return {"symbol": symbol.upper(), "price": price}
-        else:
-            return {"error": f"CoinGecko returned {r.status_code}"}
     except Exception as e:
-        return {"error": str(e)}
+        logger.warning(f"CoinGecko failed: {e}")
+
+    return {"error": "All price APIs failed"}
 
 # ============================================
 # CONTENT GENERATION
 # ============================================
 def generate_content(topic, content_type="article"):
-    """Generate full-length content using AI."""
     prompts = {
         "article": f"Write a 300-word informative article about: {topic}. Keep it safe and educational.",
-        "tweet_thread": f"Write a 3-tweet thread about: {topic}. Each tweet should be under 280 characters. Number them 1/3, 2/3, etc.",
-        "script": f"Write a 30-second video script about: {topic}. Include a hook, main content, and call to action.",
-        "post": f"Write an engaging social media post about: {topic}. Include hashtags and a call to action."
+        "tweet_thread": f"Write a 3-tweet thread about: {topic}. Each tweet under 280 chars. Number them 1/3, 2/3, etc.",
+        "script": f"Write a 30-second video script about: {topic}.",
+        "post": f"Write an engaging social media post about: {topic}. Include hashtags."
     }
     prompt = prompts.get(content_type, prompts["article"])
     body = ai_ask(prompt)
@@ -215,7 +235,7 @@ def handle_command(text, chat_id):
             tg_send(f"🧠 Generating {ctype} about '{topic}'...")
             result = generate_content(topic, ctype)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed to generate content. Check Render logs.")
+                tg_send("❌ AI failed (Google servers busy). Please try again in a few minutes.")
             else:
                 tg_send(f"✅ Saved!\n\n{result['body'][:500]}...")
 
@@ -250,17 +270,14 @@ def work_loop():
             # 2. Generate a money-making idea
             idea = ai_ask("Give one short money-making idea in one sentence.")
             db.log("ai", idea)
-            logger.info(f"AI idea: {idea}")
 
-            # 3. Auto-generate one piece of content (shortened prompt for reliability)
+            # 3. Auto-generate one piece of content
             topics = ["crypto trading", "AI automation", "passive income"]
             topic = random.choice(topics)
             generate_content(topic, "post")
-            logger.info(f"Generated content about: {topic}")
 
             # 4. Simulated earning track
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
-            db.log("earning", "Daily task completed")
 
             # 5. Telegram daily ping
             tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
