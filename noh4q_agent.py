@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 2 (Robust)
+NOH4Q AGENT - PHASE 2 (Quota-Safe)
 Runs 24/7 on Render, controlled via Telegram
 """
 
@@ -75,7 +75,7 @@ class DB:
 db = DB()
 
 # ============================================
-# AI BRAIN (Gemini with Retry)
+# AI BRAIN (Gemini with Rate Limit Handling)
 # ============================================
 def ai_ask(prompt, retries=3):
     if not GEMINI_KEY:
@@ -101,6 +101,9 @@ def ai_ask(prompt, retries=3):
             elif r.status_code == 503:
                 logger.warning(f"Gemini 503 (busy). Retry {attempt+1}/{retries} in 5s...")
                 time.sleep(5)
+            elif r.status_code == 429:
+                logger.warning(f"Gemini 429 (quota exceeded). Waiting 25s before retry {attempt+1}/{retries}...")
+                time.sleep(25)
             else:
                 logger.error(f"Gemini API Error: {r.status_code} - {r.text}")
                 break # Don't retry 400/404 errors
@@ -111,27 +114,38 @@ def ai_ask(prompt, retries=3):
     return "AI unavailable - fallback mode"
 
 # ============================================
-# MARKET DATA (CryptoCompare - Reliable)
+# MARKET DATA (Coinbase -> Kraken -> CoinGecko)
 # ============================================
 def get_crypto_price(symbol="BTC"):
     crypto_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "DOGE": "DOGE", 
                   "BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL"}
     fsym = crypto_map.get(symbol.upper(), "BTC")
     
-    # Primary: CryptoCompare
+    # Primary: Coinbase
     try:
-        r = requests.get(
-            f"https://min-api.cryptocompare.com/data/price?fsym={fsym}&tsyms=USD",
-            timeout=10
-        )
+        r = requests.get(f"https://api.coinbase.com/v2/prices/{fsym}-USD/spot", timeout=10)
         if r.status_code == 200:
-            price = r.json()["USD"]
+            price = float(r.json()["data"]["amount"])
             db.save_price(symbol.upper(), price)
             return {"symbol": symbol.upper(), "price": price}
     except Exception as e:
-        logger.warning(f"CryptoCompare failed: {e}")
+        logger.warning(f"Coinbase failed: {e}")
 
-    # Fallback: CoinGecko
+    # Fallback 1: Kraken
+    try:
+        kraken_map = {"BTC": "XBT", "ETH": "ETH", "SOL": "SOL", "DOGE": "XDG"}
+        ksym = kraken_map.get(fsym)
+        if ksym:
+            r = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={ksym}USD", timeout=10)
+            if r.status_code == 200:
+                data = r.json()["result"]
+                price = float(list(data.values())[0]["c"][0])
+                db.save_price(symbol.upper(), price)
+                return {"symbol": symbol.upper(), "price": price}
+    except Exception as e:
+        logger.warning(f"Kraken failed: {e}")
+
+    # Fallback 2: CoinGecko
     try:
         coin_id = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "DOGE": "dogecoin"}.get(fsym, "bitcoin")
         r = requests.get(
@@ -235,7 +249,7 @@ def handle_command(text, chat_id):
             tg_send(f"🧠 Generating {ctype} about '{topic}'...")
             result = generate_content(topic, ctype)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed (Google servers busy). Please try again in a few minutes.")
+                tg_send("❌ AI failed (Quota exceeded or busy). Please try again later.")
             else:
                 tg_send(f"✅ Saved!\n\n{result['body'][:500]}...")
 
@@ -257,21 +271,21 @@ def handle_command(text, chat_id):
         tg_send(f"Unknown command: {text}\nTry /status, /report, /ask, /price, /content, /history")
 
 # ============================================
-# AUTOMATION LOOP (24/7 work)
+# AUTOMATION LOOP (Every 4 hours to save quota)
 # ============================================
 def work_loop():
     while True:
         try:
-            # 1. Track BTC price every hour
+            # 1. Track BTC price every 4 hours
             price = get_crypto_price("BTC")
             if "price" in price:
                 logger.info(f"BTC: ${price['price']:,.2f}")
 
-            # 2. Generate a money-making idea
+            # 2. Generate a money-making idea (uses 1 AI call)
             idea = ai_ask("Give one short money-making idea in one sentence.")
             db.log("ai", idea)
 
-            # 3. Auto-generate one piece of content
+            # 3. Auto-generate one piece of content (uses 1 AI call)
             topics = ["crypto trading", "AI automation", "passive income"]
             topic = random.choice(topics)
             generate_content(topic, "post")
@@ -282,8 +296,8 @@ def work_loop():
             # 5. Telegram daily ping
             tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
 
-            # Wait 1 hour between cycles
-            time.sleep(3600)
+            # Wait 4 hours between cycles (saves Gemini quota)
+            time.sleep(14400)
         except Exception as e:
             logger.error(f"Work loop error: {e}")
             time.sleep(300)
