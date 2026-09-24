@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 2 (Quota-Safe)
+NOH4Q AGENT - PHASE 2 (Free Multi-Provider AI)
 Runs 24/7 on Render, controlled via Telegram
 """
 
@@ -19,6 +19,8 @@ from flask import Flask, jsonify
 # CONFIG
 # ============================================
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+CEREBRAS_KEY = os.getenv("CEREBRAS_API_KEY", "")
+MISTRAL_KEY = os.getenv("MISTRAL_API_KEY", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "NOH4Q")
@@ -75,13 +77,11 @@ class DB:
 db = DB()
 
 # ============================================
-# AI BRAIN (Gemini with Rate Limit Handling)
+# AI BRAIN (Gemini -> Cerebras -> Mistral)
 # ============================================
-def ai_ask(prompt, retries=3):
-    if not GEMINI_KEY:
-        return "AI unavailable - fallback mode"
-    
-    for attempt in range(retries):
+def ai_ask(prompt):
+    # 1. Google Gemini (Primary)
+    if GEMINI_KEY:
         try:
             r = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}",
@@ -98,19 +98,53 @@ def ai_ask(prompt, retries=3):
             )
             if r.status_code == 200:
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            elif r.status_code == 503:
-                logger.warning(f"Gemini 503 (busy). Retry {attempt+1}/{retries} in 5s...")
-                time.sleep(5)
             elif r.status_code == 429:
-                logger.warning(f"Gemini 429 (quota exceeded). Waiting 25s before retry {attempt+1}/{retries}...")
-                time.sleep(25)
+                logger.warning("Gemini 429 (quota). Trying Cerebras...")
             else:
                 logger.error(f"Gemini API Error: {r.status_code} - {r.text}")
-                break # Don't retry 400/404 errors
         except Exception as e:
             logger.warning(f"Gemini request failed: {e}")
-            time.sleep(2)
-            
+
+    # 2. Cerebras (Backup 1)
+    if CEREBRAS_KEY:
+        try:
+            r = requests.post(
+                "https://api.cerebras.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
+                json={
+                    "model": "llama3.1-70b",
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=30
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+            else:
+                logger.warning(f"Cerebras failed: {r.status_code} - {r.text}")
+        except Exception as e:
+            logger.warning(f"Cerebras request failed: {e}")
+
+    # 3. Mistral AI (Backup 2)
+    if MISTRAL_KEY:
+        try:
+            r = requests.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
+                json={
+                    "model": "mistral-small-latest",
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=30
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+            else:
+                logger.warning(f"Mistral failed: {r.status_code} - {r.text}")
+        except Exception as e:
+            logger.warning(f"Mistral request failed: {e}")
+
+    # All providers failed
+    logger.error("All AI providers failed or are out of quota.")
     return "AI unavailable - fallback mode"
 
 # ============================================
@@ -219,10 +253,17 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v2 online.\nTotal earned: ${db.total():.2f}\n\nNew commands:\n/price BTC\n/content blockchain article\n/history BTC")
+        tg_send(f"🤖 NOH4Q Agent v2 online.\nTotal earned: ${db.total():.2f}\n\nCommands:\n/price BTC\n/content blockchain article\n/history BTC")
 
     elif text == "/status":
         tg_send(f"✅ Agent running.\nEarned: ${db.total():.2f}\nTime: {datetime.now().isoformat()}")
+
+    elif text == "/ai":
+        status = "🧠 AI Provider Status:\n"
+        status += f"  - Gemini: {'✅ Online' if GEMINI_KEY else '❌ No key'}\n"
+        status += f"  - Cerebras: {'✅ Online' if CEREBRAS_KEY else '❌ No key'}\n"
+        status += f"  - Mistral: {'✅ Online' if MISTRAL_KEY else '❌ No key'}\n"
+        tg_send(status)
 
     elif text == "/report":
         tg_send(f"📊 Report\nEarned: ${db.total():.2f}\nEvents logged: {len(db.c.execute('SELECT * FROM events').fetchall())}")
@@ -249,7 +290,7 @@ def handle_command(text, chat_id):
             tg_send(f"🧠 Generating {ctype} about '{topic}'...")
             result = generate_content(topic, ctype)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed (Quota exceeded or busy). Please try again later.")
+                tg_send("❌ AI failed. Please check Render logs.")
             else:
                 tg_send(f"✅ Saved!\n\n{result['body'][:500]}...")
 
@@ -268,10 +309,10 @@ def handle_command(text, chat_id):
         tg_send("🔓 Unlocked. Full access enabled.")
 
     else:
-        tg_send(f"Unknown command: {text}\nTry /status, /report, /ask, /price, /content, /history")
+        tg_send(f"Unknown command: {text}\nTry /status, /ai, /report, /ask, /price, /content, /history")
 
 # ============================================
-# AUTOMATION LOOP (Every 4 hours to save quota)
+# AUTOMATION LOOP (Every 4 hours)
 # ============================================
 def work_loop():
     while True:
@@ -281,11 +322,11 @@ def work_loop():
             if "price" in price:
                 logger.info(f"BTC: ${price['price']:,.2f}")
 
-            # 2. Generate a money-making idea (uses 1 AI call)
+            # 2. Generate a money-making idea
             idea = ai_ask("Give one short money-making idea in one sentence.")
             db.log("ai", idea)
 
-            # 3. Auto-generate one piece of content (uses 1 AI call)
+            # 3. Auto-generate one piece of content
             topics = ["crypto trading", "AI automation", "passive income"]
             topic = random.choice(topics)
             generate_content(topic, "post")
@@ -296,7 +337,7 @@ def work_loop():
             # 5. Telegram daily ping
             tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
 
-            # Wait 4 hours between cycles (saves Gemini quota)
+            # Wait 4 hours between cycles
             time.sleep(14400)
         except Exception as e:
             logger.error(f"Work loop error: {e}")
