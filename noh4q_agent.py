@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 2 (Free Multi-Provider AI)
+NOH4Q AGENT - PHASE 2 (Corrected AI Models)
 Runs 24/7 on Render, controlled via Telegram
 """
 
@@ -100,19 +100,30 @@ def ai_ask(prompt):
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
             elif r.status_code == 429:
                 logger.warning("Gemini 429 (quota). Trying Cerebras...")
+            elif r.status_code == 503:
+                logger.warning("Gemini 503 (busy). Waiting 10s...")
+                time.sleep(10)
+                # Try once more
+                r2 = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}",
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                    timeout=60
+                )
+                if r2.status_code == 200:
+                    return r2.json()["candidates"][0]["content"]["parts"][0]["text"]
             else:
                 logger.error(f"Gemini API Error: {r.status_code} - {r.text}")
         except Exception as e:
             logger.warning(f"Gemini request failed: {e}")
 
-    # 2. Cerebras (Backup 1)
+    # 2. Cerebras (Backup 1) - CORRECTED MODEL NAME
     if CEREBRAS_KEY:
         try:
             r = requests.post(
                 "https://api.cerebras.ai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
                 json={
-                    "model": "llama3.1-70b",
+                    "model": "gpt-oss-120b",
                     "messages": [{"role": "user", "content": prompt}]
                 },
                 timeout=30
@@ -124,9 +135,10 @@ def ai_ask(prompt):
         except Exception as e:
             logger.warning(f"Cerebras request failed: {e}")
 
-    # 3. Mistral AI (Backup 2)
+    # 3. Mistral AI (Backup 2) - WITH 2-SECOND DELAY
     if MISTRAL_KEY:
         try:
+            time.sleep(2)  # Respect 1 request/second limit
             r = requests.post(
                 "https://api.mistral.ai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
@@ -253,16 +265,16 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v2 online.\nTotal earned: ${db.total():.2f}\n\nCommands:\n/price BTC\n/content blockchain article\n/history BTC")
+        tg_send(f"🤖 NOH4Q Agent v2 online.\nTotal earned: ${db.total():.2f}\n\nCommands:\n/price BTC\n/content blockchain article\n/history BTC\n/ai")
 
     elif text == "/status":
         tg_send(f"✅ Agent running.\nEarned: ${db.total():.2f}\nTime: {datetime.now().isoformat()}")
 
     elif text == "/ai":
         status = "🧠 AI Provider Status:\n"
-        status += f"  - Gemini: {'✅ Online' if GEMINI_KEY else '❌ No key'}\n"
-        status += f"  - Cerebras: {'✅ Online' if CEREBRAS_KEY else '❌ No key'}\n"
-        status += f"  - Mistral: {'✅ Online' if MISTRAL_KEY else '❌ No key'}\n"
+        status += f"  - Gemini: {'✅ Key set' if GEMINI_KEY else '❌ No key'}\n"
+        status += f"  - Cerebras: {'✅ Key set' if CEREBRAS_KEY else '❌ No key'}\n"
+        status += f"  - Mistral: {'✅ Key set' if MISTRAL_KEY else '❌ No key'}\n"
         tg_send(status)
 
     elif text == "/report":
@@ -290,7 +302,7 @@ def handle_command(text, chat_id):
             tg_send(f"🧠 Generating {ctype} about '{topic}'...")
             result = generate_content(topic, ctype)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed. Please check Render logs.")
+                tg_send("❌ AI failed. All providers busy or out of quota. Try again in 5 minutes.")
             else:
                 tg_send(f"✅ Saved!\n\n{result['body'][:500]}...")
 
