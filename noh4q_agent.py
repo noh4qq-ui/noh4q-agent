@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 2 (Corrected AI Models)
+NOH4Q AGENT - PHASE 2 (4-Provider AI Fallback)
 Runs 24/7 on Render, controlled via Telegram
 """
 
@@ -19,8 +19,9 @@ from flask import Flask, jsonify
 # CONFIG
 # ============================================
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
-CEREBRAS_KEY = os.getenv("CEREBRAS_API_KEY", "")
-MISTRAL_KEY = os.getenv("MISTRAL_API_KEY", "")
+OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
+COHERE_KEY = os.getenv("COHERE_API_KEY", "")
+HF_KEY = os.getenv("HF_API_KEY", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "NOH4Q")
@@ -77,7 +78,7 @@ class DB:
 db = DB()
 
 # ============================================
-# AI BRAIN (Gemini -> Cerebras -> Mistral)
+# AI BRAIN (Gemini -> OpenRouter -> Cohere -> Hugging Face)
 # ============================================
 def ai_ask(prompt):
     # 1. Google Gemini (Primary)
@@ -99,11 +100,10 @@ def ai_ask(prompt):
             if r.status_code == 200:
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
             elif r.status_code == 429:
-                logger.warning("Gemini 429 (quota). Trying Cerebras...")
+                logger.warning("Gemini 429 (quota). Trying OpenRouter...")
             elif r.status_code == 503:
-                logger.warning("Gemini 503 (busy). Waiting 10s...")
+                logger.warning("Gemini 503 (busy). Waiting 10s then retrying...")
                 time.sleep(10)
-                # Try once more
                 r2 = requests.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}",
                     json={"contents": [{"parts": [{"text": prompt}]}]},
@@ -116,14 +116,14 @@ def ai_ask(prompt):
         except Exception as e:
             logger.warning(f"Gemini request failed: {e}")
 
-    # 2. Cerebras (Backup 1) - CORRECTED MODEL NAME
-    if CEREBRAS_KEY:
+    # 2. OpenRouter (Backup 1)
+    if OPENROUTER_KEY:
         try:
             r = requests.post(
-                "https://api.cerebras.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
                 json={
-                    "model": "gpt-oss-120b",
+                    "model": "meta-llama/llama-3.3-70b-instruct:free",
                     "messages": [{"role": "user", "content": prompt}]
                 },
                 timeout=30
@@ -131,29 +131,48 @@ def ai_ask(prompt):
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"]
             else:
-                logger.warning(f"Cerebras failed: {r.status_code} - {r.text}")
+                logger.warning(f"OpenRouter failed: {r.status_code} - {r.text}")
         except Exception as e:
-            logger.warning(f"Cerebras request failed: {e}")
+            logger.warning(f"OpenRouter request failed: {e}")
 
-    # 3. Mistral AI (Backup 2) - WITH 2-SECOND DELAY
-    if MISTRAL_KEY:
+    # 3. Cohere (Backup 2)
+    if COHERE_KEY:
         try:
-            time.sleep(2)  # Respect 1 request/second limit
+            time.sleep(2)  # Respect rate limit
             r = requests.post(
-                "https://api.mistral.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
+                "https://api.cohere.com/v1/chat",
+                headers={"Authorization": f"Bearer {COHERE_KEY}"},
                 json={
-                    "model": "mistral-small-latest",
-                    "messages": [{"role": "user", "content": prompt}]
+                    "model": "command-r-plus",
+                    "message": prompt
                 },
                 timeout=30
             )
             if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"]
+                return r.json()["text"]
             else:
-                logger.warning(f"Mistral failed: {r.status_code} - {r.text}")
+                logger.warning(f"Cohere failed: {r.status_code} - {r.text}")
         except Exception as e:
-            logger.warning(f"Mistral request failed: {e}")
+            logger.warning(f"Cohere request failed: {e}")
+
+    # 4. Hugging Face (Backup 3)
+    if HF_KEY:
+        try:
+            r = requests.post(
+                "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
+                headers={"Authorization": f"Bearer {HF_KEY}"},
+                json={"inputs": prompt},
+                timeout=30
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) > 0:
+                    return data[0].get("generated_text", str(data))
+                return str(data)
+            else:
+                logger.warning(f"Hugging Face failed: {r.status_code} - {r.text}")
+        except Exception as e:
+            logger.warning(f"Hugging Face request failed: {e}")
 
     # All providers failed
     logger.error("All AI providers failed or are out of quota.")
@@ -273,8 +292,9 @@ def handle_command(text, chat_id):
     elif text == "/ai":
         status = "🧠 AI Provider Status:\n"
         status += f"  - Gemini: {'✅ Key set' if GEMINI_KEY else '❌ No key'}\n"
-        status += f"  - Cerebras: {'✅ Key set' if CEREBRAS_KEY else '❌ No key'}\n"
-        status += f"  - Mistral: {'✅ Key set' if MISTRAL_KEY else '❌ No key'}\n"
+        status += f"  - OpenRouter: {'✅ Key set' if OPENROUTER_KEY else '❌ No key'}\n"
+        status += f"  - Cohere: {'✅ Key set' if COHERE_KEY else '❌ No key'}\n"
+        status += f"  - HuggingFace: {'✅ Key set' if HF_KEY else '❌ No key'}\n"
         tg_send(status)
 
     elif text == "/report":
