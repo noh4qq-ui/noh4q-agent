@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 2 (4-Provider AI Fallback)
+NOH4Q AGENT - PHASE 3A (Telegram Channel Auto-Posting)
 Runs 24/7 on Render, controlled via Telegram
 """
 
@@ -23,7 +23,8 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 COHERE_KEY = os.getenv("COHERE_API_KEY", "")
 HF_KEY = os.getenv("HF_API_KEY", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")      # Your personal chat for control
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")  # Your public channel
 ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "NOH4Q")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
@@ -257,6 +258,24 @@ def tg_send(text):
     except Exception as e:
         logger.warning(f"Telegram send failed: {e}")
 
+def tg_post_to_channel(text):
+    """Post content to the public Telegram Channel."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL_ID:
+        logger.warning("Channel ID not set. Skipping channel post.")
+        return
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text},
+            timeout=10
+        )
+        if r.status_code == 200:
+            logger.info(f"✅ Posted to channel: {TELEGRAM_CHANNEL_ID}")
+        else:
+            logger.warning(f"Channel post failed: {r.status_code} - {r.text}")
+    except Exception as e:
+        logger.warning(f"Channel post error: {e}")
+
 def tg_poll():
     offset = 0
     while True:
@@ -284,7 +303,7 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v2 online.\nTotal earned: ${db.total():.2f}\n\nCommands:\n/price BTC\n/content blockchain article\n/history BTC\n/ai")
+        tg_send(f"🤖 NOH4Q Agent v3 online.\nTotal earned: ${db.total():.2f}\n\nCommands:\n/post <topic> <type>\n/price BTC\n/content blockchain article\n/ai")
 
     elif text == "/status":
         tg_send(f"✅ Agent running.\nEarned: ${db.total():.2f}\nTime: {datetime.now().isoformat()}")
@@ -295,6 +314,7 @@ def handle_command(text, chat_id):
         status += f"  - OpenRouter: {'✅ Key set' if OPENROUTER_KEY else '❌ No key'}\n"
         status += f"  - Cohere: {'✅ Key set' if COHERE_KEY else '❌ No key'}\n"
         status += f"  - HuggingFace: {'✅ Key set' if HF_KEY else '❌ No key'}\n"
+        status += f"  - Channel ID: {'✅ Set' if TELEGRAM_CHANNEL_ID else '❌ Not set'}\n"
         tg_send(status)
 
     elif text == "/report":
@@ -303,6 +323,22 @@ def handle_command(text, chat_id):
     elif text.startswith("/ask "):
         answer = ai_ask(text[5:])
         tg_send(f"🧠 {answer}")
+
+    elif text.startswith("/post "):
+        parts = text[6:].strip().split()
+        if len(parts) < 2:
+            tg_send("Usage: /post <topic> <article|tweet_thread|post|script>")
+        else:
+            topic = " ".join(parts[:-1])
+            ctype = parts[-1]
+            tg_send(f"🧠 Generating {ctype} about '{topic}' and posting to channel...")
+            result = generate_content(topic, ctype)
+            if "AI unavailable" in result['body']:
+                tg_send("❌ AI failed. All providers busy or out of quota.")
+            else:
+                # Post to public channel
+                tg_post_to_channel(f"📝 {topic.title()}\n\n{result['body']}")
+                tg_send(f"✅ Posted to channel successfully!")
 
     elif text.startswith("/price "):
         symbol = text[7:].strip().upper()
@@ -322,34 +358,23 @@ def handle_command(text, chat_id):
             tg_send(f"🧠 Generating {ctype} about '{topic}'...")
             result = generate_content(topic, ctype)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed. All providers busy or out of quota. Try again in 5 minutes.")
+                tg_send("❌ AI failed. Try again later.")
             else:
-                tg_send(f"✅ Saved!\n\n{result['body'][:500]}...")
-
-    elif text.startswith("/history "):
-        symbol = text[9:].strip().upper()
-        history = db.price_history(symbol)
-        if not history:
-            tg_send(f"No price history for {symbol} yet. Use /price {symbol} first.")
-        else:
-            lines = [f"📈 {symbol} Price History (latest {len(history)}):"]
-            for price, ts in history:
-                lines.append(f"  ${price:,.2f} — {ts[:16]}")
-            tg_send("\n".join(lines))
+                tg_send(f"✅ Saved to database!\n\n{result['body'][:500]}...")
 
     elif text == "/NOH4Q":
         tg_send("🔓 Unlocked. Full access enabled.")
 
     else:
-        tg_send(f"Unknown command: {text}\nTry /status, /ai, /report, /ask, /price, /content, /history")
+        tg_send(f"Unknown command: {text}\nTry /status, /ai, /report, /ask, /price, /content, /post, /history")
 
 # ============================================
-# AUTOMATION LOOP (Every 4 hours)
+# AUTOMATION LOOP (Every 4 hours, now with channel posting)
 # ============================================
 def work_loop():
     while True:
         try:
-            # 1. Track BTC price every 4 hours
+            # 1. Track BTC price
             price = get_crypto_price("BTC")
             if "price" in price:
                 logger.info(f"BTC: ${price['price']:,.2f}")
@@ -358,10 +383,13 @@ def work_loop():
             idea = ai_ask("Give one short money-making idea in one sentence.")
             db.log("ai", idea)
 
-            # 3. Auto-generate one piece of content
+            # 3. Auto-generate and post content to channel
             topics = ["crypto trading", "AI automation", "passive income"]
             topic = random.choice(topics)
-            generate_content(topic, "post")
+            content = generate_content(topic, "post")
+            
+            if "AI unavailable" not in content['body']:
+                tg_post_to_channel(f"🤖 Auto-Generated Post\n\n{content['body']}")
 
             # 4. Simulated earning track
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
@@ -369,21 +397,20 @@ def work_loop():
             # 5. Telegram daily ping
             tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
 
-            # Wait 4 hours between cycles
-            time.sleep(14400)
+            time.sleep(14400)  # 4 hours
         except Exception as e:
             logger.error(f"Work loop error: {e}")
             time.sleep(300)
 
 # ============================================
-# WEB SERVER (health + dashboard)
+# WEB SERVER
 # ============================================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return f"""
-    <h1>🤖 NOH4Q Agent v2</h1>
+    <h1>🤖 NOH4Q Agent v3</h1>
     <p>Status: Running</p>
     <p>Total earned: ${db.total():.2f}</p>
     <p>Time: {datetime.now().isoformat()}</p>
@@ -395,11 +422,7 @@ def health():
 
 @app.route("/api/status")
 def api_status():
-    return jsonify({
-        "alive": True,
-        "earned": db.total(),
-        "events": len(db.c.execute("SELECT * FROM events").fetchall())
-    })
+    return jsonify({"alive": True, "earned": db.total(), "events": len(db.c.execute("SELECT * FROM events").fetchall())})
 
 @app.route("/api/price/<symbol>")
 def api_price(symbol):
@@ -408,7 +431,7 @@ def api_price(symbol):
 # ============================================
 # START BACKGROUND TASKS
 # ============================================
-logger.info("🚀 NOH4Q Phase 2 starting background tasks...")
+logger.info("🚀 NOH4Q Phase 3A starting background tasks...")
 threading.Thread(target=tg_poll, daemon=True).start()
 threading.Thread(target=work_loop, daemon=True).start()
 logger.info("✅ Telegram listener started. Waiting for messages...")
