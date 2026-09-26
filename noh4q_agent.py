@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 3B COMPLETE
+NOH4Q AGENT - PHASE 3B COMPLETE (Fixed HF + Improved AI)
 Posts to: Telegram + Discord + Bluesky + Mastodon
 """
 
@@ -79,64 +79,106 @@ class DB:
 db = DB()
 
 # ============================================
-# AI BRAIN (Multi-Provider Fallback)
+# AI BRAIN (Multi-Provider Fallback - FIXED)
 # ============================================
 def ai_ask(prompt):
+    # --- 1. Gemini ---
     if GEMINI_KEY:
-        try:
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}",
-                json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=60
-            )
-            if r.status_code == 200:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            elif r.status_code in [429, 503]:
-                logger.warning(f"Gemini {r.status_code}. Trying next...")
-        except Exception as e:
-            logger.warning(f"Gemini failed: {e}")
+        for attempt in range(2):
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "safetySettings": [
+                            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+                        ]
+                    },
+                    timeout=60
+                )
+                if r.status_code == 200:
+                    logger.info("✅ Gemini")
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                elif r.status_code == 503:
+                    logger.warning(f"Gemini 503 (busy). Retry {attempt+1}/2...")
+                    time.sleep(8)
+                elif r.status_code == 429:
+                    logger.warning("Gemini 429 (quota). Moving to next...")
+                    break
+                else:
+                    logger.warning(f"Gemini {r.status_code}: {r.text[:100]}")
+                    break
+            except Exception as e:
+                logger.warning(f"Gemini exception: {e}")
+                break
 
+    # --- 2. OpenRouter ---
     if OPENROUTER_KEY:
         try:
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
-                json={"model": "meta-llama/llama-3.3-70b-instruct:free",
-                      "messages": [{"role": "user", "content": prompt}]},
-                timeout=30
+                json={
+                    "model": "meta-llama/llama-3.3-70b-instruct:free",
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=45
             )
             if r.status_code == 200:
+                logger.info("✅ OpenRouter")
                 return r.json()["choices"][0]["message"]["content"]
+            else:
+                logger.warning(f"OpenRouter {r.status_code}: {r.text[:100]}")
         except Exception as e:
-            logger.warning(f"OpenRouter failed: {e}")
+            logger.warning(f"OpenRouter exception: {e}")
 
+    # --- 3. Cohere ---
     if COHERE_KEY:
         try:
             time.sleep(2)
             r = requests.post(
                 "https://api.cohere.com/v1/chat",
                 headers={"Authorization": f"Bearer {COHERE_KEY}"},
-                json={"model": "command-r-plus", "message": prompt}, timeout=30
+                json={"model": "command-r-plus", "message": prompt},
+                timeout=45
             )
             if r.status_code == 200:
+                logger.info("✅ Cohere")
                 return r.json()["text"]
+            else:
+                logger.warning(f"Cohere {r.status_code}: {r.text[:100]}")
         except Exception as e:
-            logger.warning(f"Cohere failed: {e}")
+            logger.warning(f"Cohere exception: {e}")
 
+    # --- 4. Hugging Face (FIXED - New endpoint) ---
     if HF_KEY:
         try:
+            # FIXED: Use the new router endpoint
             r = requests.post(
-                "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
+                "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3",
                 headers={"Authorization": f"Bearer {HF_KEY}"},
-                json={"inputs": prompt}, timeout=30
+                json={
+                    "inputs": prompt,
+                    "parameters": {"max_new_tokens": 500, "return_full_text": False}
+                },
+                timeout=45
             )
             if r.status_code == 200:
                 data = r.json()
                 if isinstance(data, list) and len(data) > 0:
-                    return data[0].get("generated_text", str(data))
+                    result = data[0].get("generated_text", str(data))
+                    logger.info("✅ HuggingFace")
+                    return result
                 return str(data)
+            else:
+                logger.warning(f"HF {r.status_code}: {r.text[:100]}")
         except Exception as e:
-            logger.warning(f"HF failed: {e}")
+            logger.warning(f"HF exception: {e}")
 
+    logger.error("❌ All AI providers failed")
     return "AI unavailable - fallback mode"
 
 # ============================================
@@ -332,7 +374,7 @@ def handle_command(text, chat_id):
             tg_send(f"🧠 Generating and posting to 4 platforms...")
             result = generate_content(topic, ctype)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed.")
+                tg_send("❌ AI failed. All providers busy. Try again in 30 seconds.")
             else:
                 results = post_to_all_platforms(result['body'])
                 success = sum(1 for v in results.values() if v)
