@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 3A (Telegram Channel Auto-Posting)
-Runs 24/7 on Render, controlled via Telegram
+NOH4Q AGENT - PHASE 3B COMPLETE
+Posts to: Telegram + Discord + Bluesky + Mastodon
 """
 
 import os
@@ -23,8 +23,13 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 COHERE_KEY = os.getenv("COHERE_API_KEY", "")
 HF_KEY = os.getenv("HF_API_KEY", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")      # Your personal chat for control
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")  # Your public channel
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK", "")
+BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE", "")
+BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD", "")
+MASTODON_URL = os.getenv("MASTODON_URL", "")
+MASTODON_TOKEN = os.getenv("MASTODON_TOKEN", "")
 ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "NOH4Q")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
@@ -71,123 +76,75 @@ class DB:
         self.c.execute("SELECT COALESCE(SUM(amount),0) FROM earnings")
         return self.c.fetchone()[0]
 
-    def price_history(self, symbol, limit=10):
-        self.c.execute("SELECT price, ts FROM prices WHERE symbol=? ORDER BY id DESC LIMIT ?",
-                       (symbol, limit))
-        return self.c.fetchall()
-
 db = DB()
 
 # ============================================
-# AI BRAIN (Gemini -> OpenRouter -> Cohere -> Hugging Face)
+# AI BRAIN (Multi-Provider Fallback)
 # ============================================
 def ai_ask(prompt):
-    # 1. Google Gemini (Primary)
     if GEMINI_KEY:
         try:
             r = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}",
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "safetySettings": [
-                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-                    ]
-                },
-                timeout=60
+                json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=60
             )
             if r.status_code == 200:
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            elif r.status_code == 429:
-                logger.warning("Gemini 429 (quota). Trying OpenRouter...")
-            elif r.status_code == 503:
-                logger.warning("Gemini 503 (busy). Waiting 10s then retrying...")
-                time.sleep(10)
-                r2 = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}",
-                    json={"contents": [{"parts": [{"text": prompt}]}]},
-                    timeout=60
-                )
-                if r2.status_code == 200:
-                    return r2.json()["candidates"][0]["content"]["parts"][0]["text"]
-            else:
-                logger.error(f"Gemini API Error: {r.status_code} - {r.text}")
+            elif r.status_code in [429, 503]:
+                logger.warning(f"Gemini {r.status_code}. Trying next...")
         except Exception as e:
-            logger.warning(f"Gemini request failed: {e}")
+            logger.warning(f"Gemini failed: {e}")
 
-    # 2. OpenRouter (Backup 1)
     if OPENROUTER_KEY:
         try:
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
-                json={
-                    "model": "meta-llama/llama-3.3-70b-instruct:free",
-                    "messages": [{"role": "user", "content": prompt}]
-                },
+                json={"model": "meta-llama/llama-3.3-70b-instruct:free",
+                      "messages": [{"role": "user", "content": prompt}]},
                 timeout=30
             )
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"]
-            else:
-                logger.warning(f"OpenRouter failed: {r.status_code} - {r.text}")
         except Exception as e:
-            logger.warning(f"OpenRouter request failed: {e}")
+            logger.warning(f"OpenRouter failed: {e}")
 
-    # 3. Cohere (Backup 2)
     if COHERE_KEY:
         try:
-            time.sleep(2)  # Respect rate limit
+            time.sleep(2)
             r = requests.post(
                 "https://api.cohere.com/v1/chat",
                 headers={"Authorization": f"Bearer {COHERE_KEY}"},
-                json={
-                    "model": "command-r-plus",
-                    "message": prompt
-                },
-                timeout=30
+                json={"model": "command-r-plus", "message": prompt}, timeout=30
             )
             if r.status_code == 200:
                 return r.json()["text"]
-            else:
-                logger.warning(f"Cohere failed: {r.status_code} - {r.text}")
         except Exception as e:
-            logger.warning(f"Cohere request failed: {e}")
+            logger.warning(f"Cohere failed: {e}")
 
-    # 4. Hugging Face (Backup 3)
     if HF_KEY:
         try:
             r = requests.post(
                 "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
                 headers={"Authorization": f"Bearer {HF_KEY}"},
-                json={"inputs": prompt},
-                timeout=30
+                json={"inputs": prompt}, timeout=30
             )
             if r.status_code == 200:
                 data = r.json()
                 if isinstance(data, list) and len(data) > 0:
                     return data[0].get("generated_text", str(data))
                 return str(data)
-            else:
-                logger.warning(f"Hugging Face failed: {r.status_code} - {r.text}")
         except Exception as e:
-            logger.warning(f"Hugging Face request failed: {e}")
+            logger.warning(f"HF failed: {e}")
 
-    # All providers failed
-    logger.error("All AI providers failed or are out of quota.")
     return "AI unavailable - fallback mode"
 
 # ============================================
-# MARKET DATA (Coinbase -> Kraken -> CoinGecko)
+# MARKET DATA
 # ============================================
 def get_crypto_price(symbol="BTC"):
-    crypto_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "DOGE": "DOGE", 
-                  "BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL"}
+    crypto_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "DOGE": "DOGE"}
     fsym = crypto_map.get(symbol.upper(), "BTC")
-    
-    # Primary: Coinbase
     try:
         r = requests.get(f"https://api.coinbase.com/v2/prices/{fsym}-USD/spot", timeout=10)
         if r.status_code == 200:
@@ -196,37 +153,7 @@ def get_crypto_price(symbol="BTC"):
             return {"symbol": symbol.upper(), "price": price}
     except Exception as e:
         logger.warning(f"Coinbase failed: {e}")
-
-    # Fallback 1: Kraken
-    try:
-        kraken_map = {"BTC": "XBT", "ETH": "ETH", "SOL": "SOL", "DOGE": "XDG"}
-        ksym = kraken_map.get(fsym)
-        if ksym:
-            r = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={ksym}USD", timeout=10)
-            if r.status_code == 200:
-                data = r.json()["result"]
-                price = float(list(data.values())[0]["c"][0])
-                db.save_price(symbol.upper(), price)
-                return {"symbol": symbol.upper(), "price": price}
-    except Exception as e:
-        logger.warning(f"Kraken failed: {e}")
-
-    # Fallback 2: CoinGecko
-    try:
-        coin_id = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "DOGE": "dogecoin"}.get(fsym, "bitcoin")
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": coin_id, "vs_currencies": "usd"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            price = r.json()[coin_id]["usd"]
-            db.save_price(symbol.upper(), price)
-            return {"symbol": symbol.upper(), "price": price}
-    except Exception as e:
-        logger.warning(f"CoinGecko failed: {e}")
-
-    return {"error": "All price APIs failed"}
+    return {"error": "Price unavailable"}
 
 # ============================================
 # CONTENT GENERATION
@@ -234,7 +161,7 @@ def get_crypto_price(symbol="BTC"):
 def generate_content(topic, content_type="article"):
     prompts = {
         "article": f"Write a 300-word informative article about: {topic}. Keep it safe and educational.",
-        "tweet_thread": f"Write a 3-tweet thread about: {topic}. Each tweet under 280 chars. Number them 1/3, 2/3, etc.",
+        "tweet_thread": f"Write a 3-tweet thread about: {topic}. Each tweet under 280 chars.",
         "script": f"Write a 30-second video script about: {topic}.",
         "post": f"Write an engaging social media post about: {topic}. Include hashtags."
     }
@@ -242,6 +169,94 @@ def generate_content(topic, content_type="article"):
     body = ai_ask(prompt)
     db.save_content(topic, content_type, body)
     return {"topic": topic, "type": content_type, "body": body}
+
+# ============================================
+# MULTI-PLATFORM POSTING
+# ============================================
+def post_to_telegram(text):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL_ID:
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text[:4000]}, timeout=10
+        )
+        if r.status_code == 200:
+            logger.info("✅ Telegram")
+            return True
+    except Exception as e:
+        logger.warning(f"Telegram failed: {e}")
+    return False
+
+def post_to_discord(text):
+    if not DISCORD_WEBHOOK:
+        return False
+    try:
+        r = requests.post(DISCORD_WEBHOOK, json={"content": text[:1900]}, timeout=10)
+        if r.status_code in [200, 204]:
+            logger.info("✅ Discord")
+            return True
+    except Exception as e:
+        logger.warning(f"Discord failed: {e}")
+    return False
+
+def post_to_bluesky(text):
+    if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
+        return False
+    try:
+        r = requests.post(
+            "https://bsky.social/xrpc/com.atproto.server.createSession",
+            json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_PASSWORD}, timeout=10
+        )
+        if r.status_code != 200:
+            return False
+        session = r.json()
+        r2 = requests.post(
+            "https://bsky.social/xrpc/com.atproto.repo.createRecord",
+            headers={"Authorization": f"Bearer {session['accessJwt']}"},
+            json={
+                "repo": session["did"],
+                "collection": "app.bsky.feed.post",
+                "record": {
+                    "text": text[:300],
+                    "$type": "app.bsky.feed.post",
+                    "createdAt": datetime.now().isoformat() + "Z"
+                }
+            }, timeout=10
+        )
+        if r2.status_code == 200:
+            logger.info("✅ Bluesky")
+            return True
+    except Exception as e:
+        logger.warning(f"Bluesky failed: {e}")
+    return False
+
+def post_to_mastodon(text):
+    if not MASTODON_URL or not MASTODON_TOKEN:
+        return False
+    try:
+        r = requests.post(
+            f"{MASTODON_URL}/api/v1/statuses",
+            headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
+            json={"status": text[:500], "visibility": "public"}, timeout=10
+        )
+        if r.status_code == 200:
+            logger.info("✅ Mastodon")
+            return True
+    except Exception as e:
+        logger.warning(f"Mastodon failed: {e}")
+    return False
+
+def post_to_all_platforms(text):
+    results = {
+        "telegram": post_to_telegram(text),
+        "discord": post_to_discord(text),
+        "bluesky": post_to_bluesky(text),
+        "mastodon": post_to_mastodon(text),
+    }
+    success = sum(1 for v in results.values() if v)
+    logger.info(f"📢 Posted to {success}/4 platforms: {results}")
+    return results
 
 # ============================================
 # TELEGRAM CONTROL
@@ -252,29 +267,10 @@ def tg_send(text):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
-            timeout=10
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10
         )
     except Exception as e:
-        logger.warning(f"Telegram send failed: {e}")
-
-def tg_post_to_channel(text):
-    """Post content to the public Telegram Channel."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL_ID:
-        logger.warning("Channel ID not set. Skipping channel post.")
-        return
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text},
-            timeout=10
-        )
-        if r.status_code == 200:
-            logger.info(f"✅ Posted to channel: {TELEGRAM_CHANNEL_ID}")
-        else:
-            logger.warning(f"Channel post failed: {r.status_code} - {r.text}")
-    except Exception as e:
-        logger.warning(f"Channel post error: {e}")
+        logger.warning(f"TG send failed: {e}")
 
 def tg_poll():
     offset = 0
@@ -282,12 +278,10 @@ def tg_poll():
         try:
             r = requests.get(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                params={"offset": offset + 1, "timeout": 20},
-                timeout=30
+                params={"offset": offset + 1, "timeout": 20}, timeout=30
             )
             if r.status_code == 200:
-                data = r.json()
-                for update in data.get("result", []):
+                for update in r.json().get("result", []):
                     offset = update["update_id"]
                     msg = update.get("message", {})
                     text = msg.get("text", "")
@@ -295,7 +289,7 @@ def tg_poll():
                     if text:
                         handle_command(text, chat_id)
         except Exception as e:
-            logger.warning(f"Telegram poll error: {e}")
+            logger.warning(f"TG poll failed: {e}")
         time.sleep(2)
 
 def handle_command(text, chat_id):
@@ -303,26 +297,30 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v3 online.\nTotal earned: ${db.total():.2f}\n\nCommands:\n/post <topic> <type>\n/price BTC\n/content blockchain article\n/ai")
+        tg_send(f"🤖 NOH4Q Agent v3B\nTotal earned: ${db.total():.2f}\n\n"
+                f"Commands:\n/platforms\n/post <topic> <type>\n/price BTC\n/ai")
 
-    elif text == "/status":
-        tg_send(f"✅ Agent running.\nEarned: ${db.total():.2f}\nTime: {datetime.now().isoformat()}")
+    elif text == "/platforms":
+        status = "📢 Platform Status:\n"
+        status += f"  Telegram: {'✅' if TELEGRAM_CHANNEL_ID else '❌'}\n"
+        status += f"  Discord: {'✅' if DISCORD_WEBHOOK else '❌'}\n"
+        status += f"  Bluesky: {'✅' if BLUESKY_HANDLE else '❌'}\n"
+        status += f"  Mastodon: {'✅' if MASTODON_TOKEN else '❌'}\n"
+        tg_send(status)
 
     elif text == "/ai":
-        status = "🧠 AI Provider Status:\n"
-        status += f"  - Gemini: {'✅ Key set' if GEMINI_KEY else '❌ No key'}\n"
-        status += f"  - OpenRouter: {'✅ Key set' if OPENROUTER_KEY else '❌ No key'}\n"
-        status += f"  - Cohere: {'✅ Key set' if COHERE_KEY else '❌ No key'}\n"
-        status += f"  - HuggingFace: {'✅ Key set' if HF_KEY else '❌ No key'}\n"
-        status += f"  - Channel ID: {'✅ Set' if TELEGRAM_CHANNEL_ID else '❌ Not set'}\n"
+        status = "🧠 AI Providers:\n"
+        status += f"  Gemini: {'✅' if GEMINI_KEY else '❌'}\n"
+        status += f"  OpenRouter: {'✅' if OPENROUTER_KEY else '❌'}\n"
+        status += f"  Cohere: {'✅' if COHERE_KEY else '❌'}\n"
+        status += f"  HuggingFace: {'✅' if HF_KEY else '❌'}\n"
         tg_send(status)
 
     elif text == "/report":
-        tg_send(f"📊 Report\nEarned: ${db.total():.2f}\nEvents logged: {len(db.c.execute('SELECT * FROM events').fetchall())}")
+        tg_send(f"📊 Report\nEarned: ${db.total():.2f}")
 
     elif text.startswith("/ask "):
-        answer = ai_ask(text[5:])
-        tg_send(f"🧠 {answer}")
+        tg_send(f"🧠 {ai_ask(text[5:])}")
 
     elif text.startswith("/post "):
         parts = text[6:].strip().split()
@@ -331,73 +329,51 @@ def handle_command(text, chat_id):
         else:
             topic = " ".join(parts[:-1])
             ctype = parts[-1]
-            tg_send(f"🧠 Generating {ctype} about '{topic}' and posting to channel...")
+            tg_send(f"🧠 Generating and posting to 4 platforms...")
             result = generate_content(topic, ctype)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed. All providers busy or out of quota.")
+                tg_send("❌ AI failed.")
             else:
-                # Post to public channel
-                tg_post_to_channel(f"📝 {topic.title()}\n\n{result['body']}")
-                tg_send(f"✅ Posted to channel successfully!")
+                results = post_to_all_platforms(result['body'])
+                success = sum(1 for v in results.values() if v)
+                tg_send(f"✅ Posted to {success}/4 platforms!\n{json.dumps(results, indent=2)}")
 
     elif text.startswith("/price "):
         symbol = text[7:].strip().upper()
         result = get_crypto_price(symbol)
         if "error" in result:
-            tg_send(f"❌ Price error: {result['error']}")
+            tg_send(f"❌ {result['error']}")
         else:
             tg_send(f"💰 {result['symbol']}: ${result['price']:,.2f}")
 
-    elif text.startswith("/content "):
-        parts = text[9:].strip().split()
-        if len(parts) < 2:
-            tg_send("Usage: /content <topic> <article|tweet_thread|script|post>")
-        else:
-            topic = " ".join(parts[:-1])
-            ctype = parts[-1]
-            tg_send(f"🧠 Generating {ctype} about '{topic}'...")
-            result = generate_content(topic, ctype)
-            if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed. Try again later.")
-            else:
-                tg_send(f"✅ Saved to database!\n\n{result['body'][:500]}...")
-
     elif text == "/NOH4Q":
-        tg_send("🔓 Unlocked. Full access enabled.")
+        tg_send("🔓 Unlocked.")
 
     else:
-        tg_send(f"Unknown command: {text}\nTry /status, /ai, /report, /ask, /price, /content, /post, /history")
+        tg_send(f"Unknown: {text}\nTry /platforms, /post, /price, /ai")
 
 # ============================================
-# AUTOMATION LOOP (Every 4 hours, now with channel posting)
+# WORK LOOP (Every 4 hours)
 # ============================================
 def work_loop():
     while True:
         try:
-            # 1. Track BTC price
             price = get_crypto_price("BTC")
             if "price" in price:
                 logger.info(f"BTC: ${price['price']:,.2f}")
 
-            # 2. Generate a money-making idea
             idea = ai_ask("Give one short money-making idea in one sentence.")
             db.log("ai", idea)
 
-            # 3. Auto-generate and post content to channel
-            topics = ["crypto trading", "AI automation", "passive income"]
-            topic = random.choice(topics)
+            topic = random.choice(["crypto trading", "AI automation", "passive income"])
             content = generate_content(topic, "post")
-            
             if "AI unavailable" not in content['body']:
-                tg_post_to_channel(f"🤖 Auto-Generated Post\n\n{content['body']}")
+                post_to_all_platforms(f"🤖 {content['body']}")
 
-            # 4. Simulated earning track
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
-
-            # 5. Telegram daily ping
             tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
 
-            time.sleep(14400)  # 4 hours
+            time.sleep(14400)
         except Exception as e:
             logger.error(f"Work loop error: {e}")
             time.sleep(300)
@@ -409,36 +385,24 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return f"""
-    <h1>🤖 NOH4Q Agent v3</h1>
-    <p>Status: Running</p>
-    <p>Total earned: ${db.total():.2f}</p>
-    <p>Time: {datetime.now().isoformat()}</p>
-    """
+    return f"<h1>🤖 NOH4Q Agent v3B</h1><p>Earned: ${db.total():.2f}</p>"
 
 @app.route("/health")
 def health():
-    return {"status": "alive", "time": datetime.now().isoformat(), "earned": db.total()}
+    return {"status": "alive", "earned": db.total()}
 
 @app.route("/api/status")
 def api_status():
-    return jsonify({"alive": True, "earned": db.total(), "events": len(db.c.execute("SELECT * FROM events").fetchall())})
-
-@app.route("/api/price/<symbol>")
-def api_price(symbol):
-    return jsonify(get_crypto_price(symbol.upper()))
+    return jsonify({"alive": True, "earned": db.total()})
 
 # ============================================
-# START BACKGROUND TASKS
+# START
 # ============================================
-logger.info("🚀 NOH4Q Phase 3A starting background tasks...")
+logger.info("🚀 NOH4Q Phase 3B COMPLETE starting...")
 threading.Thread(target=tg_poll, daemon=True).start()
 threading.Thread(target=work_loop, daemon=True).start()
-logger.info("✅ Telegram listener started. Waiting for messages...")
+logger.info("✅ Multi-platform posting enabled (4 platforms)")
 
-# ============================================
-# MAIN ENTRY
-# ============================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
