@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 4A (Visual Content)
+NOH4Q AGENT - PHASE 4B (Telegraph + Beehiiv Blog Integration)
 Posts to: Telegram + Discord + Bluesky + Mastodon
-With AI-generated images from Pollinations AI
+With AI-generated images and Blog publishing (Telegraph + Beehiiv)
 """
 
 import os
@@ -32,6 +32,8 @@ BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE", "")
 BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD", "")
 MASTODON_URL = os.getenv("MASTODON_URL", "")
 MASTODON_TOKEN = os.getenv("MASTODON_TOKEN", "")
+BEEHIIV_API_KEY = os.getenv("BEEHIIV_API_KEY", "")
+BEEHIIV_PUBLICATION_ID = os.getenv("BEEHIIV_PUBLICATION_ID", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,6 +53,8 @@ class DB:
             (id INTEGER PRIMARY KEY, symbol TEXT, price REAL, ts TEXT)""")
         self.c.execute("""CREATE TABLE IF NOT EXISTS content
             (id INTEGER PRIMARY KEY, topic TEXT, content_type TEXT, body TEXT, image_url TEXT, ts TEXT)""")
+        self.c.execute("""CREATE TABLE IF NOT EXISTS settings
+            (key TEXT PRIMARY KEY, value TEXT)""")
         self.conn.commit()
 
     def log(self, etype, message):
@@ -73,6 +77,15 @@ class DB:
                        (topic, content_type, body, image_url, datetime.now().isoformat()))
         self.conn.commit()
 
+    def get_setting(self, key, default=""):
+        self.c.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = self.c.fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key, value):
+        self.c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
+        self.conn.commit()
+
     def total(self):
         self.c.execute("SELECT COALESCE(SUM(amount),0) FROM earnings")
         return self.c.fetchone()[0]
@@ -80,7 +93,7 @@ class DB:
 db = DB()
 
 # ============================================
-# AI BRAIN (Multi-Provider Fallback)
+# AI BRAIN
 # ============================================
 def ai_ask(prompt):
     if GEMINI_KEY:
@@ -161,11 +174,9 @@ def ai_ask(prompt):
     return "AI unavailable - fallback mode"
 
 # ============================================
-# IMAGE GENERATION (Pollinations AI - 100% Free)
+# IMAGE GENERATION (Pollinations AI)
 # ============================================
 def generate_image_url(prompt, width=1024, height=1024):
-    """Build a Pollinations AI image URL from a text prompt."""
-    # Clean the prompt for URL use
     clean_prompt = prompt[:200].strip()
     encoded = urllib.parse.quote(clean_prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&model=flux"
@@ -173,12 +184,10 @@ def generate_image_url(prompt, width=1024, height=1024):
     return url
 
 def create_image_prompt(topic, body):
-    """Ask the AI to create a short image prompt based on the post content."""
     image_prompt = ai_ask(
         f"Create a short, vivid image description (max 15 words) for a social media post about: {topic}. "
         f"Style: modern, digital art, high quality. Return only the description, no quotes."
     )
-    # Fallback if AI fails
     if "AI unavailable" in image_prompt:
         image_prompt = f"Digital art of {topic}, modern style, vibrant colors"
     logger.info(f"🎨 Image prompt: {image_prompt[:80]}")
@@ -204,9 +213,8 @@ def get_crypto_price(symbol="BTC"):
 # CONTENT GENERATION
 # ============================================
 def generate_content(topic, content_type="post", with_image=True):
-    """Generate text content AND an image."""
     prompts = {
-        "article": f"Write a 300-word informative article about: {topic}. Keep it safe and educational.",
+        "article": f"Write a 400-word informative article about: {topic}. Use clear headings, short paragraphs, and end with a conclusion. Keep it safe and educational.",
         "tweet_thread": f"Write a 3-tweet thread about: {topic}. Each tweet under 280 chars.",
         "script": f"Write a 30-second video script about: {topic}.",
         "post": f"Write an engaging social media post about: {topic}. Include hashtags. Keep under 200 words."
@@ -223,43 +231,31 @@ def generate_content(topic, content_type="post", with_image=True):
     return {"topic": topic, "type": content_type, "body": body, "image_url": image_url}
 
 # ============================================
-# MULTI-PLATFORM POSTING (WITH IMAGES)
+# SOCIAL POSTING
 # ============================================
-
-# ---------- Telegram (Photo with Caption) ----------
 def post_to_telegram(text, image_url=""):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL_ID:
         return False
     try:
         if image_url:
-            # Send photo with caption
             r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-                json={
-                    "chat_id": TELEGRAM_CHANNEL_ID,
-                    "photo": image_url,
-                    "caption": text[:1024]
-                }, timeout=30
+                json={"chat_id": TELEGRAM_CHANNEL_ID, "photo": image_url, "caption": text[:1024]}, timeout=30
             )
             if r.status_code == 200:
                 logger.info("✅ Telegram (with image)")
                 return True
-            else:
-                logger.warning(f"Telegram photo failed: {r.text[:150]}")
-                # Fallback to text-only
-        # Text-only fallback
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text[:4000]}, timeout=10
         )
         if r.status_code == 200:
-            logger.info("✅ Telegram (text only)")
+            logger.info("✅ Telegram (text)")
             return True
     except Exception as e:
         logger.warning(f"Telegram failed: {e}")
     return False
 
-# ---------- Discord (Embed with Image) ----------
 def post_to_discord(text, image_url=""):
     if not DISCORD_WEBHOOK:
         return False
@@ -275,12 +271,10 @@ def post_to_discord(text, image_url=""):
         logger.warning(f"Discord failed: {e}")
     return False
 
-# ---------- Bluesky (Blob Upload) ----------
 def post_to_bluesky(text, image_url=""):
     if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
         return False
     try:
-        # Login
         r = requests.post(
             "https://bsky.social/xrpc/com.atproto.server.createSession",
             json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_PASSWORD}, timeout=15
@@ -290,69 +284,40 @@ def post_to_bluesky(text, image_url=""):
         session = r.json()
         jwt = session["accessJwt"]
         did = session["did"]
-
-        record = {
-            "text": text[:300],
-            "$type": "app.bsky.feed.post",
-            "createdAt": datetime.now().isoformat() + "Z"
-        }
-
-        # Attach image if provided
+        record = {"text": text[:300], "$type": "app.bsky.feed.post",
+                  "createdAt": datetime.now().isoformat() + "Z"}
         if image_url:
             try:
                 img_resp = requests.get(image_url, timeout=60)
                 if img_resp.status_code == 200 and len(img_resp.content) > 1000:
                     upload_resp = requests.post(
                         "https://bsky.social/xrpc/com.atproto.repo.uploadBlob",
-                        headers={
-                            "Authorization": f"Bearer {jwt}",
-                            "Content-Type": "image/png"
-                        },
-                        data=img_resp.content,
-                        timeout=60
+                        headers={"Authorization": f"Bearer {jwt}", "Content-Type": "image/png"},
+                        data=img_resp.content, timeout=60
                     )
                     if upload_resp.status_code == 200:
                         blob = upload_resp.json()["blob"]
-                        record["embed"] = {
-                            "$type": "app.bsky.embed.images",
-                            "images": [{
-                                "alt": text[:100],
-                                "image": blob
-                            }]
-                        }
-                        logger.info("✅ Bluesky image uploaded")
-                    else:
-                        logger.warning(f"Bluesky blob upload failed: {upload_resp.text[:150]}")
+                        record["embed"] = {"$type": "app.bsky.embed.images",
+                                          "images": [{"alt": text[:100], "image": blob}]}
             except Exception as e:
                 logger.warning(f"Bluesky image error: {e}")
-
-        # Post
         r2 = requests.post(
             "https://bsky.social/xrpc/com.atproto.repo.createRecord",
             headers={"Authorization": f"Bearer {jwt}"},
-            json={
-                "repo": did,
-                "collection": "app.bsky.feed.post",
-                "record": record
-            }, timeout=30
+            json={"repo": did, "collection": "app.bsky.feed.post", "record": record}, timeout=30
         )
         if r2.status_code == 200:
             logger.info("✅ Bluesky")
             return True
-        else:
-            logger.warning(f"Bluesky post failed: {r2.text[:150]}")
     except Exception as e:
         logger.warning(f"Bluesky failed: {e}")
     return False
 
-# ---------- Mastodon (Media Upload) ----------
 def post_to_mastodon(text, image_url=""):
     if not MASTODON_URL or not MASTODON_TOKEN:
         return False
     try:
         media_ids = []
-
-        # Upload image if provided
         if image_url:
             try:
                 img_resp = requests.get(image_url, timeout=60)
@@ -361,23 +326,15 @@ def post_to_mastodon(text, image_url=""):
                         f"{MASTODON_URL}/api/v2/media",
                         headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
                         files={"file": ("image.png", img_resp.content, "image/png")},
-                        data={"description": text[:100]},
-                        timeout=60
+                        data={"description": text[:100]}, timeout=60
                     )
                     if upload_resp.status_code in [200, 202]:
-                        media_id = upload_resp.json()["id"]
-                        media_ids.append(media_id)
-                        logger.info("✅ Mastodon image uploaded")
-                    else:
-                        logger.warning(f"Mastodon media upload failed: {upload_resp.text[:150]}")
+                        media_ids.append(upload_resp.json()["id"])
             except Exception as e:
                 logger.warning(f"Mastodon image error: {e}")
-
-        # Post status
         payload = {"status": text[:500], "visibility": "public"}
         if media_ids:
             payload["media_ids"] = media_ids
-
         r = requests.post(
             f"{MASTODON_URL}/api/v1/statuses",
             headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
@@ -390,7 +347,6 @@ def post_to_mastodon(text, image_url=""):
         logger.warning(f"Mastodon failed: {e}")
     return False
 
-# ---------- Post to ALL platforms ----------
 def post_to_all_platforms(text, image_url=""):
     results = {
         "telegram": post_to_telegram(text, image_url),
@@ -399,7 +355,135 @@ def post_to_all_platforms(text, image_url=""):
         "mastodon": post_to_mastodon(text, image_url),
     }
     success = sum(1 for v in results.values() if v)
-    logger.info(f"📢 Posted to {success}/4 platforms (image: {bool(image_url)})")
+    logger.info(f"📢 Posted to {success}/4 platforms")
+    return results
+
+# ============================================
+# TELEGRAPH BLOG (No signup, no verification)
+# ============================================
+def get_telegraph_token():
+    """Get or create a Telegraph access token (cached in DB)."""
+    token = db.get_setting("telegraph_token", "")
+    if token:
+        return token
+    try:
+        r = requests.post(
+            "https://api.telegra.ph/createAccount",
+            data={
+                "short_name": "NOH4Q",
+                "author_name": "NOH4Q Agent"
+            },
+            timeout=15
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("ok"):
+                token = data["result"]["access_token"]
+                db.set_setting("telegraph_token", token)
+                logger.info("✅ Telegraph account created")
+                return token
+    except Exception as e:
+        logger.warning(f"Telegraph token failed: {e}")
+    return ""
+
+def markdown_to_telegraph_nodes(text):
+    """Convert simple text into Telegraph Node format."""
+    nodes = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Headings
+        if line.startswith("### "):
+            nodes.append({"tag": "h4", "children": [line[4:]]})
+        elif line.startswith("## "):
+            nodes.append({"tag": "h3", "children": [line[3:]]})
+        elif line.startswith("# "):
+            nodes.append({"tag": "h3", "children": [line[2:]]})
+        # Bullet lists
+        elif line.startswith("- ") or line.startswith("* "):
+            nodes.append({"tag": "ul", "children": [
+                {"tag": "li", "children": [line[2:]]}
+            ]})
+        # Regular paragraph
+        else:
+            nodes.append({"tag": "p", "children": [line]})
+    return nodes
+
+def publish_to_telegraph(title, article_body):
+    """Publish an article to Telegraph and return the URL."""
+    token = get_telegraph_token()
+    if not token:
+        return None
+    try:
+        nodes = markdown_to_telegraph_nodes(article_body)
+        r = requests.post(
+            "https://api.telegra.ph/createPage",
+            data={
+                "access_token": token,
+                "title": title[:256],
+                "author_name": "NOH4Q Agent",
+                "content": json.dumps(nodes),
+                "return_content": "false"
+            },
+            timeout=20
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("ok"):
+                url = data["result"]["url"]
+                logger.info(f"✅ Telegraph: {url}")
+                return url
+        logger.warning(f"Telegraph publish failed: {r.text[:150]}")
+    except Exception as e:
+        logger.warning(f"Telegraph error: {e}")
+    return None
+
+# ============================================
+# BEEHIIV BLOG (Requires Stripe ID verification)
+# ============================================
+def publish_to_beehiiv(title, article_body):
+    if not BEEHIIV_API_KEY or not BEEHIIV_PUBLICATION_ID:
+        logger.info("⏭️ Beehiiv skipped (no API key)")
+        return False
+    url = f"https://api.beehiiv.com/v2/publications/{BEEHIIV_PUBLICATION_ID}/posts"
+    headers = {
+        "Authorization": f"Bearer {BEEHIIV_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "title": title,
+        "body_content": article_body.replace("\n", "<br>"),
+        "status": "draft"
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        if r.status_code == 201:
+            logger.info("✅ Beehiiv (draft)")
+            return True
+        else:
+            logger.warning(f"Beehiiv failed: {r.text[:150]}")
+    except Exception as e:
+        logger.warning(f"Beehiiv error: {e}")
+    return False
+
+# ============================================
+# PUBLISH TO BOTH BLOGS
+# ============================================
+def publish_article(topic, body):
+    """Publish to both Telegraph and Beehiiv. Returns URLs."""
+    title = f"AI Insights: {topic.title()}"
+    results = {"title": title, "telegraph": None, "beehiiv": False}
+
+    # Telegraph (always try)
+    url = publish_to_telegraph(title, body)
+    if url:
+        results["telegraph"] = url
+
+    # Beehiiv (if keys available)
+    if BEEHIIV_API_KEY and BEEHIIV_PUBLICATION_ID:
+        results["beehiiv"] = publish_to_beehiiv(title, body)
+
     return results
 
 # ============================================
@@ -441,16 +525,22 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v4A (Visual)\nTotal earned: ${db.total():.2f}\n\n"
-                f"Commands:\n/post <topic> <type> - post with image\n/noimage <topic> <type> - post text only\n"
-                f"/platforms\n/price BTC\n/ai")
+        tg_send(f"🤖 NOH4Q Agent v4B (Telegraph + Beehiiv)\nEarned: ${db.total():.2f}\n\n"
+                f"Commands:\n"
+                f"/post <topic> <type>\n"
+                f"/blog <topic> - publish to Telegraph + Beehiiv\n"
+                f"/platforms\n"
+                f"/price BTC\n"
+                f"/ai")
 
     elif text == "/platforms":
-        status = "📢 Platform Status:\n"
+        status = "📢 Platforms:\n"
         status += f"  Telegram: {'✅' if TELEGRAM_CHANNEL_ID else '❌'}\n"
         status += f"  Discord: {'✅' if DISCORD_WEBHOOK else '❌'}\n"
         status += f"  Bluesky: {'✅' if BLUESKY_HANDLE else '❌'}\n"
         status += f"  Mastodon: {'✅' if MASTODON_TOKEN else '❌'}\n"
+        status += f"  Telegraph: ✅ (always on)\n"
+        status += f"  Beehiiv: {'✅' if BEEHIIV_API_KEY else '❌ (no key)'}\n"
         tg_send(status)
 
     elif text == "/ai":
@@ -474,31 +564,34 @@ def handle_command(text, chat_id):
         else:
             topic = " ".join(parts[:-1])
             ctype = parts[-1]
-            tg_send(f"🎨 Generating text + image for '{topic}'...")
+            tg_send(f"🎨 Generating '{topic}'...")
             result = generate_content(topic, ctype, with_image=True)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed. Try again in 30 seconds.")
+                tg_send("❌ AI failed.")
             else:
-                tg_send(f"✅ Image generated. Posting to 4 platforms...")
                 results = post_to_all_platforms(result['body'], result['image_url'])
                 success = sum(1 for v in results.values() if v)
                 tg_send(f"✅ Posted to {success}/4 platforms!")
 
-    elif text.startswith("/noimage "):
-        parts = text[9:].strip().split()
-        if len(parts) < 2:
-            tg_send("Usage: /noimage <topic> <type>")
+    elif text.startswith("/blog "):
+        topic = text[6:].strip()
+        if not topic:
+            tg_send("Usage: /blog <topic>")
         else:
-            topic = " ".join(parts[:-1])
-            ctype = parts[-1]
-            tg_send(f"🧠 Generating text only for '{topic}'...")
-            result = generate_content(topic, ctype, with_image=False)
+            tg_send(f"📝 Writing article about '{topic}'...")
+            result = generate_content(topic, "article", with_image=False)
             if "AI unavailable" in result['body']:
                 tg_send("❌ AI failed.")
             else:
-                results = post_to_all_platforms(result['body'], "")
-                success = sum(1 for v in results.values() if v)
-                tg_send(f"✅ Posted to {success}/4 platforms (no image)!")
+                pub = publish_article(topic, result['body'])
+                msg = f"✅ Published!\n\n"
+                if pub['telegraph']:
+                    msg += f"📖 Telegraph: {pub['telegraph']}\n"
+                if pub['beehiiv']:
+                    msg += f"📰 Beehiiv: draft created\n"
+                elif not BEEHIIV_API_KEY:
+                    msg += f"📰 Beehiiv: skipped (no key)\n"
+                tg_send(msg)
 
     elif text.startswith("/price "):
         symbol = text[7:].strip().upper()
@@ -509,33 +602,35 @@ def handle_command(text, chat_id):
             tg_send(f"💰 {result['symbol']}: ${result['price']:,.2f}")
 
     else:
-        tg_send(f"Unknown: {text}\nTry /post, /noimage, /platforms, /ai")
+        tg_send(f"Unknown: {text}\nTry /post, /blog, /platforms, /ai, /price")
 
 # ============================================
-# WORK LOOP (Every 4 hours, with images)
+# WORK LOOP
 # ============================================
 def work_loop():
     while True:
         try:
-            # 1. Get BTC price
             price = get_crypto_price("BTC")
             if "price" in price:
                 logger.info(f"BTC: ${price['price']:,.2f}")
 
-            # 2. Generate + post content with image
+            # Generate social post with image
             topic = random.choice(["crypto trading", "AI automation", "passive income", "blockchain"])
             content = generate_content(topic, "post", with_image=True)
-
             if "AI unavailable" not in content['body']:
                 post_to_all_platforms(content['body'], content['image_url'])
 
-            # 3. Earnings log
+            # Generate article and publish to blogs
+            article = generate_content(topic, "article", with_image=False)
+            if "AI unavailable" not in article['body']:
+                pub = publish_article(topic, article['body'])
+                if pub['telegraph']:
+                    tg_send(f"📖 New Telegraph article: {pub['telegraph']}")
+
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
+            tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
 
-            # 4. Telegram ping
-            tg_send(f"💼 Cycle done (with image). BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
-
-            time.sleep(14400)  # 4 hours
+            time.sleep(14400)
         except Exception as e:
             logger.error(f"Work loop error: {e}")
             time.sleep(300)
@@ -547,7 +642,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return f"<h1>🤖 NOH4Q Agent v4A (Visual)</h1><p>Earned: ${db.total():.2f}</p>"
+    return f"<h1>🤖 NOH4Q Agent v4B</h1><p>Earned: ${db.total():.2f}</p>"
 
 @app.route("/health")
 def health():
@@ -560,10 +655,10 @@ def api_status():
 # ============================================
 # START
 # ============================================
-logger.info("🚀 NOH4Q Phase 4A (Visual Content) starting...")
+logger.info("🚀 NOH4Q Phase 4B (Telegraph + Beehiiv) starting...")
 threading.Thread(target=tg_poll, daemon=True).start()
 threading.Thread(target=work_loop, daemon=True).start()
-logger.info("✅ Multi-platform + image generation enabled")
+logger.info("✅ Telegraph + Beehiiv + 4 social platforms enabled")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
