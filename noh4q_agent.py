@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 4C (FOREX Paper Trading + Everything Else)
+NOH4Q AGENT - PHASE 4C + COMMODITIES
 Social: Telegram + Discord + Bluesky + Mastodon
 Blogs: Telegraph + Beehiiv
-Trading: FOREX Paper Trading (Frankfurter API)
+Trading: FOREX + COMMODITIES (Gold, Silver, Oil) Paper Trading
 """
 
 import os
@@ -38,9 +38,20 @@ BEEHIIV_PUBLICATION_ID = os.getenv("BEEHIIV_PUBLICATION_ID", "")
 
 # FOREX settings
 FOREX_START_BALANCE = float(os.getenv("FOREX_START_BALANCE", "1000"))
-FOREX_RISK_PER_TRADE = float(os.getenv("FOREX_RISK_PER_TRADE", "2"))  # percent
+FOREX_RISK_PER_TRADE = float(os.getenv("FOREX_RISK_PER_TRADE", "2"))
+
+# FOREX pairs (fiat only - Frankfurter API)
 FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CHF"]
-FOREX_PRICE_HISTORY = {}  # In-memory price history for moving averages
+
+# Commodities (via yfinance)
+COMMODITY_MAP = {
+    "XAU/USD": "GC=F",   # Gold
+    "XAG/USD": "SI=F",   # Silver
+    "WTI":     "CL=F",   # Crude Oil WTI
+    "BRENT":   "BZ=F",   # Brent Crude
+    "NATGAS":  "NG=F",   # Natural Gas
+    "COPPER":  "HG=F",   # Copper
+}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -251,7 +262,7 @@ def get_crypto_price(symbol="BTC"):
     return {"error": "Price unavailable"}
 
 # ============================================
-# FOREX PRICES (Frankfurter API - No Key Needed)
+# FOREX PRICES (Frankfurter API - No Key)
 # ============================================
 def get_forex_price(pair="EUR/USD"):
     """Fetch live forex rate from Frankfurter API. No key, no signup."""
@@ -270,10 +281,52 @@ def get_forex_price(pair="EUR/USD"):
     return {"error": f"Could not fetch {pair}"}
 
 # ============================================
+# COMMODITIES (Gold, Silver, Oil) - via yfinance
+# ============================================
+def get_commodity_price(commodity="XAU/USD"):
+    """Fetch live commodity price via yfinance. No API key needed."""
+    ticker_symbol = COMMODITY_MAP.get(commodity.upper())
+    if not ticker_symbol:
+        return {"error": f"Commodity {commodity} not supported"}
+
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(ticker_symbol)
+        price = None
+        try:
+            price = ticker.fast_info.get("last_price")
+        except Exception:
+            price = None
+
+        if not price:
+            hist = ticker.history(period="1d")
+            if not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+
+        if price:
+            db.save_price(commodity.upper(), float(price))
+            return {"symbol": commodity.upper(), "price": float(price)}
+    except Exception as e:
+        logger.warning(f"yfinance {commodity} failed: {e}")
+    return {"error": f"Could not fetch {commodity}"}
+
+def get_all_prices():
+    """Get all forex + commodity prices."""
+    result = {}
+    for pair in FOREX_PAIRS:
+        data = get_forex_price(pair)
+        if "error" not in data:
+            result[pair] = data["price"]
+    for commodity in COMMODITY_MAP.keys():
+        data = get_commodity_price(commodity)
+        if "error" not in data:
+            result[commodity] = data["price"]
+    return result
+
+# ============================================
 # FOREX PAPER TRADING ENGINE
 # ============================================
 def get_paper_balance():
-    """Get current paper trading balance."""
     bal = db.get_setting("forex_balance", "")
     if not bal:
         db.set_setting("forex_balance", str(FOREX_START_BALANCE))
@@ -284,13 +337,12 @@ def set_paper_balance(new_balance):
     db.set_setting("forex_balance", str(round(new_balance, 2)))
 
 def calculate_sma(prices, period):
-    """Simple Moving Average."""
     if len(prices) < period:
         return None
     return sum(prices[-period:]) / period
 
 def forex_signal(pair):
-    """Generate BUY/SELL/HOLD signal using SMA crossover + momentum."""
+    """Generate BUY/SELL/HOLD signal using SMA crossover."""
     history = db.get_forex_history(pair, limit=60)
     if len(history) < 20:
         return "hold", 0
@@ -302,20 +354,25 @@ def forex_signal(pair):
     if sma_short is None or sma_long is None:
         return "hold", 0
 
-    # SMA crossover
     if sma_short > sma_long * 1.001:
         return "buy", min((sma_short - sma_long) / sma_long * 100, 1.0)
     elif sma_short < sma_long * 0.999:
         return "sell", min((sma_long - sma_short) / sma_long * 100, 1.0)
     return "hold", 0
 
-def execute_paper_trade(pair):
-    """Execute a paper forex trade based on SMA signal."""
-    signal, strength = forex_signal(pair)
+def get_asset_price(asset):
+    """Get price of either forex pair or commodity."""
+    if "/" in asset and asset.upper() not in COMMODITY_MAP:
+        return get_forex_price(asset)
+    return get_commodity_price(asset)
+
+def execute_paper_trade(asset):
+    """Execute paper trade on forex pair OR commodity (Gold, Silver, etc.)."""
+    signal, strength = forex_signal(asset)
     if signal == "hold":
         return None
 
-    price_data = get_forex_price(pair)
+    price_data = get_asset_price(asset)
     if "error" in price_data:
         return None
 
@@ -327,28 +384,25 @@ def execute_paper_trade(pair):
     if units <= 0:
         return None
 
-    # Check if we already have an open trade on this pair
     open_trades = db.get_open_forex_trades()
     for t in open_trades:
-        if t[1] == pair:
-            return None  # Already open
+        if t[1] == asset:
+            return None
 
-    db.save_forex_trade(pair, signal, price, 0, units, 0, "open")
-    logger.info(f"📈 Opened {signal.upper()} {pair} @ {price:.5f}")
-
-    return {"pair": pair, "side": signal, "price": price, "units": units}
+    db.save_forex_trade(asset, signal, price, 0, units, 0, "open")
+    logger.info(f"📈 Opened {signal.upper()} {asset} @ {price:.5f}")
+    return {"pair": asset, "side": signal, "price": price, "units": units}
 
 def monitor_paper_trades():
     """Check open trades for stop-loss / take-profit."""
     open_trades = db.get_open_forex_trades()
     for trade in open_trades:
         trade_id, pair, side, entry, units = trade
-        price_data = get_forex_price(pair)
+        price_data = get_asset_price(pair)
         if "error" in price_data:
             continue
         current = price_data["price"]
 
-        # P&L calculation
         if side == "buy":
             pnl = (current - entry) * units
             pct = (current - entry) / entry * 100
@@ -356,12 +410,11 @@ def monitor_paper_trades():
             pnl = (entry - current) * units
             pct = (entry - current) / entry * 100
 
-        # Close if +1.5% profit or -1% loss
         if pct >= 1.5 or pct <= -1.0:
             db.close_forex_trade(trade_id, current, round(pnl, 2))
             balance = get_paper_balance() + pnl
             set_paper_balance(balance)
-            db.earn("forex_paper", max(pnl, 0))
+            db.earn("paper_trade", max(pnl, 0))
             logger.info(f"📉 Closed {side.upper()} {pair} @ {current:.5f} | PnL: ${pnl:.2f}")
             return {
                 "pair": pair, "side": side, "entry": entry,
@@ -370,21 +423,20 @@ def monitor_paper_trades():
     return None
 
 def forex_report():
-    """Generate a short forex status report."""
     stats = db.get_forex_stats()
     balance = get_paper_balance()
     open_trades = db.get_open_forex_trades()
 
-    report = f"📊 FOREX PAPER TRADING\n"
+    report = f"📊 PAPER TRADING REPORT\n"
     report += f"━━━━━━━━━━━━━━━━━━━\n"
     report += f"💰 Balance: ${balance:.2f}\n"
     report += f"📈 Total PnL: ${stats['total_pnl']:.2f}\n"
     report += f"🎯 Trades: {stats['total_trades']}\n"
     report += f"✅ Win Rate: {stats['win_rate']:.1f}%\n"
-    report += f"🔓 Open Positions: {len(open_trades)}\n"
+    report += f"🔓 Open: {len(open_trades)}\n"
 
     if open_trades:
-        report += f"\n💼 Open:\n"
+        report += f"\n💼 Open Positions:\n"
         for t in open_trades:
             report += f"  • {t[1]} {t[2].upper()} @ {t[3]:.5f}\n"
 
@@ -514,16 +566,15 @@ def post_to_mastodon(text, image_url=""):
         return False
 
 def post_to_all_platforms(text, image_url=""):
-    results = {
+    return {
         "telegram": post_to_telegram(text, image_url),
         "discord": post_to_discord(text, image_url),
         "bluesky": post_to_bluesky(text, image_url),
         "mastodon": post_to_mastodon(text, image_url),
     }
-    return results
 
 # ============================================
-# TELEGRAPH
+# TELEGRAPH + BEEHIIV
 # ============================================
 def get_telegraph_token():
     token = db.get_setting("telegraph_token", "")
@@ -642,14 +693,14 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v4C (FOREX)\nEarned: ${db.total():.2f}\n\n"
+        tg_send(f"🤖 NOH4Q Agent v4C (FOREX + Commodities)\nEarned: ${db.total():.2f}\n\n"
                 f"Commands:\n"
-                f"/post <topic> <type>\n"
-                f"/blog <topic>\n"
-                f"/forex - live forex prices\n"
-                f"/trade <pair> - execute paper trade\n"
+                f"/forex - live prices (FX + Gold + Oil)\n"
+                f"/trade <asset> - paper trade\n"
                 f"/balance - paper balance\n"
                 f"/fxreport - trading report\n"
+                f"/post <topic> <type>\n"
+                f"/blog <topic>\n"
                 f"/platforms\n"
                 f"/ai")
 
@@ -661,7 +712,7 @@ def handle_command(text, chat_id):
         status += f"  Mastodon: {'✅' if MASTODON_TOKEN else '❌'}\n"
         status += f"  Telegraph: ✅\n"
         status += f"  Beehiiv: {'✅' if BEEHIIV_API_KEY else '❌'}\n"
-        status += f"  FOREX: ✅ (paper trading)"
+        status += f"  FOREX + Commodities: ✅"
         tg_send(status)
 
     elif text == "/ai":
@@ -673,22 +724,31 @@ def handle_command(text, chat_id):
 
     elif text == "/forex" or text == "/forex prices":
         msg = "💱 LIVE FOREX PRICES\n"
+        msg += "━━━━━━━━━━━━━━━━━━━\n"
         for pair in FOREX_PAIRS:
             data = get_forex_price(pair)
             if "error" not in data:
                 msg += f"  {pair}: {data['price']:.5f}\n"
+
+        msg += "\n🥇 COMMODITIES\n"
+        msg += "━━━━━━━━━━━━━━━━━━━\n"
+        for commodity in ["XAU/USD", "XAG/USD", "WTI", "BRENT", "NATGAS", "COPPER"]:
+            data = get_commodity_price(commodity)
+            if "error" not in data:
+                msg += f"  {commodity}: ${data['price']:,.2f}\n"
+
         tg_send(msg)
 
     elif text.startswith("/trade "):
-        pair = text[7:].strip().upper().replace("-", "/")
-        if pair not in FOREX_PAIRS:
-            tg_send(f"Pair must be one of: {', '.join(FOREX_PAIRS)}")
+        asset = text[7:].strip().upper()
+        # Normalize pair format
+        if "-" in asset:
+            asset = asset.replace("-", "/")
+        trade = execute_paper_trade(asset)
+        if trade:
+            tg_send(f"✅ Opened {trade['side'].upper()} {trade['pair']} @ {trade['price']:.5f}")
         else:
-            trade = execute_paper_trade(pair)
-            if trade:
-                tg_send(f"✅ Opened {trade['side'].upper()} {trade['pair']} @ {trade['price']:.5f}")
-            else:
-                tg_send(f"⏸️ No signal for {pair} (HOLD) or trade already open.")
+            tg_send(f"⏸️ No signal for {asset} (HOLD or trade already open). Try EUR/USD, XAU/USD, etc.")
 
     elif text == "/balance":
         balance = get_paper_balance()
@@ -698,7 +758,7 @@ def handle_command(text, chat_id):
         tg_send(forex_report())
 
     elif text == "/report":
-        tg_send(f"📊 Total Earnings: ${db.total():.2f}\n" + forex_report())
+        tg_send(f"📊 Total Earnings: ${db.total():.2f}\n\n" + forex_report())
 
     elif text.startswith("/ask "):
         tg_send(f"🧠 {ai_ask(text[5:])}")
@@ -746,7 +806,7 @@ def handle_command(text, chat_id):
         tg_send(f"Unknown: {text}\nTry /forex, /trade, /balance, /fxreport")
 
 # ============================================
-# WORK LOOP (Every 4 hours)
+# WORK LOOP
 # ============================================
 def work_loop():
     while True:
@@ -754,39 +814,42 @@ def work_loop():
             # 1. Crypto
             price = get_crypto_price("BTC")
 
-            # 2. FOREX: fetch prices + monitor trades + auto-trade
+            # 2. FOREX prices
             for pair in FOREX_PAIRS:
                 get_forex_price(pair)
 
-            # Auto-trade on the top pair
-            trade_opened = execute_paper_trade("EUR/USD")
+            # 3. Commodity prices (Gold, Silver, Oil)
+            for commodity in COMMODITY_MAP.keys():
+                get_commodity_price(commodity)
 
-            # Monitor open positions
+            # 4. Auto-trade forex + Gold
+            execute_paper_trade("EUR/USD")
+            execute_paper_trade("XAU/USD")
+
+            # 5. Monitor open trades
             closed = monitor_paper_trades()
 
-            # 3. Social content
-            topic = random.choice(["crypto trading", "AI automation", "passive income", "blockchain"])
+            # 6. Social content
+            topic = random.choice(["crypto trading", "AI automation", "passive income", "gold investing"])
             content = generate_content(topic, "post", with_image=True)
             if "AI unavailable" not in content['body']:
                 post_to_all_platforms(content['body'], content['image_url'])
 
-            # 4. Blog article
+            # 7. Blog article
             article = generate_content(topic, "article", with_image=False)
             if "AI unavailable" not in article['body']:
                 pub = publish_article(topic, article['body'])
                 if pub['telegraph']:
                     tg_send(f"📖 New article: {pub['telegraph']}")
 
-            # 5. Notify trades
-            if trade_opened:
-                tg_send(f"📈 Auto-trade: {trade_opened['side'].upper()} {trade_opened['pair']} @ {trade_opened['price']:.5f}")
+            # 8. Notify trades
             if closed:
                 tg_send(f"📉 Closed: {closed['side'].upper()} {closed['pair']} PnL: ${closed['pnl']:.2f}")
 
-            # 6. Summary
+            # 9. Summary
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
             balance = get_paper_balance()
-            tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | FX Balance: ${balance:.2f}")
+            tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Balance: ${balance:.2f}")
 
             time.sleep(14400)
         except Exception as e:
@@ -800,7 +863,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return f"<h1>🤖 NOH4Q Agent v4C (FOREX)</h1><p>Earned: ${db.total():.2f}</p>"
+    return f"<h1>🤖 NOH4Q Agent v4C</h1><p>Earned: ${db.total():.2f}</p>"
 
 @app.route("/health")
 def health():
@@ -808,15 +871,15 @@ def health():
 
 @app.route("/api/status")
 def api_status():
-    return jsonify({"alive": True, "earned": db.total(), "forex": get_forex_stats() if False else db.get_forex_stats()})
+    return jsonify({"alive": True, "earned": db.total(), "forex": db.get_forex_stats()})
 
 # ============================================
 # START
 # ============================================
-logger.info("🚀 NOH4Q Phase 4C (FOREX) starting...")
+logger.info("🚀 NOH4Q Phase 4C + Commodities starting...")
 threading.Thread(target=tg_poll, daemon=True).start()
 threading.Thread(target=work_loop, daemon=True).start()
-logger.info("✅ All systems enabled: Social + Blogs + FOREX")
+logger.info("✅ All systems enabled: Social + Blogs + FOREX + Commodities")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
