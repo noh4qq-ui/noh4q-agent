@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 3B COMPLETE (Fixed AI Models)
+NOH4Q AGENT - PHASE 4A (Visual Content)
 Posts to: Telegram + Discord + Bluesky + Mastodon
+With AI-generated images from Pollinations AI
 """
 
 import os
@@ -12,6 +13,7 @@ import time
 import sqlite3
 import random
 import requests
+import urllib.parse
 from datetime import datetime
 from flask import Flask, jsonify
 
@@ -30,7 +32,6 @@ BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE", "")
 BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD", "")
 MASTODON_URL = os.getenv("MASTODON_URL", "")
 MASTODON_TOKEN = os.getenv("MASTODON_TOKEN", "")
-ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "NOH4Q")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class DB:
         self.c.execute("""CREATE TABLE IF NOT EXISTS prices
             (id INTEGER PRIMARY KEY, symbol TEXT, price REAL, ts TEXT)""")
         self.c.execute("""CREATE TABLE IF NOT EXISTS content
-            (id INTEGER PRIMARY KEY, topic TEXT, content_type TEXT, body TEXT, ts TEXT)""")
+            (id INTEGER PRIMARY KEY, topic TEXT, content_type TEXT, body TEXT, image_url TEXT, ts TEXT)""")
         self.conn.commit()
 
     def log(self, etype, message):
@@ -67,9 +68,9 @@ class DB:
                        (symbol, price, datetime.now().isoformat()))
         self.conn.commit()
 
-    def save_content(self, topic, content_type, body):
-        self.c.execute("INSERT INTO content (topic, content_type, body, ts) VALUES (?,?,?,?)",
-                       (topic, content_type, body, datetime.now().isoformat()))
+    def save_content(self, topic, content_type, body, image_url=""):
+        self.c.execute("INSERT INTO content (topic, content_type, body, image_url, ts) VALUES (?,?,?,?,?)",
+                       (topic, content_type, body, image_url, datetime.now().isoformat()))
         self.conn.commit()
 
     def total(self):
@@ -79,10 +80,9 @@ class DB:
 db = DB()
 
 # ============================================
-# AI BRAIN (Multi-Provider Fallback - FIXED)
+# AI BRAIN (Multi-Provider Fallback)
 # ============================================
 def ai_ask(prompt):
-    # --- 1. Gemini (Updated Model) ---
     if GEMINI_KEY:
         for attempt in range(2):
             try:
@@ -96,89 +96,93 @@ def ai_ask(prompt):
                             {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
                         ]
-                    },
-                    timeout=60
+                    }, timeout=60
                 )
                 if r.status_code == 200:
                     logger.info("✅ Gemini")
                     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 elif r.status_code == 503:
-                    logger.warning(f"Gemini 503 (busy). Retry {attempt+1}/2...")
+                    logger.warning(f"Gemini 503. Retry {attempt+1}/2...")
                     time.sleep(8)
                 elif r.status_code == 429:
-                    logger.warning("Gemini 429 (quota). Moving to next...")
-                    break
-                else:
-                    logger.warning(f"Gemini {r.status_code}: {r.text[:100]}")
+                    logger.warning("Gemini 429 (quota). Moving on...")
                     break
             except Exception as e:
                 logger.warning(f"Gemini exception: {e}")
                 break
 
-    # --- 2. OpenRouter (Updated Free Model) ---
     if OPENROUTER_KEY:
         try:
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
-                json={
-                    "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
-                    "messages": [{"role": "user", "content": prompt}]
-                },
+                json={"model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                      "messages": [{"role": "user", "content": prompt}]},
                 timeout=45
             )
             if r.status_code == 200:
                 logger.info("✅ OpenRouter")
                 return r.json()["choices"][0]["message"]["content"]
-            else:
-                logger.warning(f"OpenRouter {r.status_code}: {r.text[:100]}")
         except Exception as e:
             logger.warning(f"OpenRouter exception: {e}")
 
-    # --- 3. Cohere (Updated Model) ---
     if COHERE_KEY:
         try:
             time.sleep(2)
             r = requests.post(
                 "https://api.cohere.com/v1/chat",
                 headers={"Authorization": f"Bearer {COHERE_KEY}"},
-                json={"model": "command-r-08-2024", "message": prompt},
-                timeout=45
+                json={"model": "command-r-08-2024", "message": prompt}, timeout=45
             )
             if r.status_code == 200:
                 logger.info("✅ Cohere")
                 return r.json()["text"]
-            else:
-                logger.warning(f"Cohere {r.status_code}: {r.text[:100]}")
         except Exception as e:
             logger.warning(f"Cohere exception: {e}")
 
-    # --- 4. Hugging Face (Updated Router Endpoint) ---
     if HF_KEY:
         try:
             r = requests.post(
                 "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3",
                 headers={"Authorization": f"Bearer {HF_KEY}"},
-                json={
-                    "inputs": prompt,
-                    "parameters": {"max_new_tokens": 500, "return_full_text": False}
-                },
+                json={"inputs": prompt, "parameters": {"max_new_tokens": 500, "return_full_text": False}},
                 timeout=45
             )
             if r.status_code == 200:
                 data = r.json()
                 if isinstance(data, list) and len(data) > 0:
-                    result = data[0].get("generated_text", str(data))
                     logger.info("✅ HuggingFace")
-                    return result
+                    return data[0].get("generated_text", str(data))
                 return str(data)
-            else:
-                logger.warning(f"HF {r.status_code}: {r.text[:100]}")
         except Exception as e:
             logger.warning(f"HF exception: {e}")
 
     logger.error("❌ All AI providers failed")
     return "AI unavailable - fallback mode"
+
+# ============================================
+# IMAGE GENERATION (Pollinations AI - 100% Free)
+# ============================================
+def generate_image_url(prompt, width=1024, height=1024):
+    """Build a Pollinations AI image URL from a text prompt."""
+    # Clean the prompt for URL use
+    clean_prompt = prompt[:200].strip()
+    encoded = urllib.parse.quote(clean_prompt)
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&model=flux"
+    logger.info(f"🎨 Image URL: {url[:80]}...")
+    return url
+
+def create_image_prompt(topic, body):
+    """Ask the AI to create a short image prompt based on the post content."""
+    image_prompt = ai_ask(
+        f"Create a short, vivid image description (max 15 words) for a social media post about: {topic}. "
+        f"Style: modern, digital art, high quality. Return only the description, no quotes."
+    )
+    # Fallback if AI fails
+    if "AI unavailable" in image_prompt:
+        image_prompt = f"Digital art of {topic}, modern style, vibrant colors"
+    logger.info(f"🎨 Image prompt: {image_prompt[:80]}")
+    return image_prompt.strip()[:200]
 
 # ============================================
 # MARKET DATA
@@ -199,41 +203,71 @@ def get_crypto_price(symbol="BTC"):
 # ============================================
 # CONTENT GENERATION
 # ============================================
-def generate_content(topic, content_type="article"):
+def generate_content(topic, content_type="post", with_image=True):
+    """Generate text content AND an image."""
     prompts = {
         "article": f"Write a 300-word informative article about: {topic}. Keep it safe and educational.",
         "tweet_thread": f"Write a 3-tweet thread about: {topic}. Each tweet under 280 chars.",
         "script": f"Write a 30-second video script about: {topic}.",
-        "post": f"Write an engaging social media post about: {topic}. Include hashtags."
+        "post": f"Write an engaging social media post about: {topic}. Include hashtags. Keep under 200 words."
     }
-    prompt = prompts.get(content_type, prompts["article"])
+    prompt = prompts.get(content_type, prompts["post"])
     body = ai_ask(prompt)
-    db.save_content(topic, content_type, body)
-    return {"topic": topic, "type": content_type, "body": body}
+
+    image_url = ""
+    if with_image and "AI unavailable" not in body:
+        image_prompt = create_image_prompt(topic, body)
+        image_url = generate_image_url(image_prompt)
+
+    db.save_content(topic, content_type, body, image_url)
+    return {"topic": topic, "type": content_type, "body": body, "image_url": image_url}
 
 # ============================================
-# MULTI-PLATFORM POSTING
+# MULTI-PLATFORM POSTING (WITH IMAGES)
 # ============================================
-def post_to_telegram(text):
+
+# ---------- Telegram (Photo with Caption) ----------
+def post_to_telegram(text, image_url=""):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL_ID:
         return False
     try:
+        if image_url:
+            # Send photo with caption
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                json={
+                    "chat_id": TELEGRAM_CHANNEL_ID,
+                    "photo": image_url,
+                    "caption": text[:1024]
+                }, timeout=30
+            )
+            if r.status_code == 200:
+                logger.info("✅ Telegram (with image)")
+                return True
+            else:
+                logger.warning(f"Telegram photo failed: {r.text[:150]}")
+                # Fallback to text-only
+        # Text-only fallback
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text[:4000]}, timeout=10
         )
         if r.status_code == 200:
-            logger.info("✅ Telegram")
+            logger.info("✅ Telegram (text only)")
             return True
     except Exception as e:
         logger.warning(f"Telegram failed: {e}")
     return False
 
-def post_to_discord(text):
+# ---------- Discord (Embed with Image) ----------
+def post_to_discord(text, image_url=""):
     if not DISCORD_WEBHOOK:
         return False
     try:
-        r = requests.post(DISCORD_WEBHOOK, json={"content": text[:1900]}, timeout=10)
+        payload = {"content": text[:1900]}
+        if image_url:
+            payload["embeds"] = [{"image": {"url": image_url}}]
+        r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=30)
         if r.status_code in [200, 204]:
             logger.info("✅ Discord")
             return True
@@ -241,45 +275,113 @@ def post_to_discord(text):
         logger.warning(f"Discord failed: {e}")
     return False
 
-def post_to_bluesky(text):
+# ---------- Bluesky (Blob Upload) ----------
+def post_to_bluesky(text, image_url=""):
     if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
         return False
     try:
+        # Login
         r = requests.post(
             "https://bsky.social/xrpc/com.atproto.server.createSession",
-            json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_PASSWORD}, timeout=10
+            json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_PASSWORD}, timeout=15
         )
         if r.status_code != 200:
             return False
         session = r.json()
+        jwt = session["accessJwt"]
+        did = session["did"]
+
+        record = {
+            "text": text[:300],
+            "$type": "app.bsky.feed.post",
+            "createdAt": datetime.now().isoformat() + "Z"
+        }
+
+        # Attach image if provided
+        if image_url:
+            try:
+                img_resp = requests.get(image_url, timeout=60)
+                if img_resp.status_code == 200 and len(img_resp.content) > 1000:
+                    upload_resp = requests.post(
+                        "https://bsky.social/xrpc/com.atproto.repo.uploadBlob",
+                        headers={
+                            "Authorization": f"Bearer {jwt}",
+                            "Content-Type": "image/png"
+                        },
+                        data=img_resp.content,
+                        timeout=60
+                    )
+                    if upload_resp.status_code == 200:
+                        blob = upload_resp.json()["blob"]
+                        record["embed"] = {
+                            "$type": "app.bsky.embed.images",
+                            "images": [{
+                                "alt": text[:100],
+                                "image": blob
+                            }]
+                        }
+                        logger.info("✅ Bluesky image uploaded")
+                    else:
+                        logger.warning(f"Bluesky blob upload failed: {upload_resp.text[:150]}")
+            except Exception as e:
+                logger.warning(f"Bluesky image error: {e}")
+
+        # Post
         r2 = requests.post(
             "https://bsky.social/xrpc/com.atproto.repo.createRecord",
-            headers={"Authorization": f"Bearer {session['accessJwt']}"},
+            headers={"Authorization": f"Bearer {jwt}"},
             json={
-                "repo": session["did"],
+                "repo": did,
                 "collection": "app.bsky.feed.post",
-                "record": {
-                    "text": text[:300],
-                    "$type": "app.bsky.feed.post",
-                    "createdAt": datetime.now().isoformat() + "Z"
-                }
-            }, timeout=10
+                "record": record
+            }, timeout=30
         )
         if r2.status_code == 200:
             logger.info("✅ Bluesky")
             return True
+        else:
+            logger.warning(f"Bluesky post failed: {r2.text[:150]}")
     except Exception as e:
         logger.warning(f"Bluesky failed: {e}")
     return False
 
-def post_to_mastodon(text):
+# ---------- Mastodon (Media Upload) ----------
+def post_to_mastodon(text, image_url=""):
     if not MASTODON_URL or not MASTODON_TOKEN:
         return False
     try:
+        media_ids = []
+
+        # Upload image if provided
+        if image_url:
+            try:
+                img_resp = requests.get(image_url, timeout=60)
+                if img_resp.status_code == 200 and len(img_resp.content) > 1000:
+                    upload_resp = requests.post(
+                        f"{MASTODON_URL}/api/v2/media",
+                        headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
+                        files={"file": ("image.png", img_resp.content, "image/png")},
+                        data={"description": text[:100]},
+                        timeout=60
+                    )
+                    if upload_resp.status_code in [200, 202]:
+                        media_id = upload_resp.json()["id"]
+                        media_ids.append(media_id)
+                        logger.info("✅ Mastodon image uploaded")
+                    else:
+                        logger.warning(f"Mastodon media upload failed: {upload_resp.text[:150]}")
+            except Exception as e:
+                logger.warning(f"Mastodon image error: {e}")
+
+        # Post status
+        payload = {"status": text[:500], "visibility": "public"}
+        if media_ids:
+            payload["media_ids"] = media_ids
+
         r = requests.post(
             f"{MASTODON_URL}/api/v1/statuses",
             headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
-            json={"status": text[:500], "visibility": "public"}, timeout=10
+            json=payload, timeout=30
         )
         if r.status_code == 200:
             logger.info("✅ Mastodon")
@@ -288,15 +390,16 @@ def post_to_mastodon(text):
         logger.warning(f"Mastodon failed: {e}")
     return False
 
-def post_to_all_platforms(text):
+# ---------- Post to ALL platforms ----------
+def post_to_all_platforms(text, image_url=""):
     results = {
-        "telegram": post_to_telegram(text),
-        "discord": post_to_discord(text),
-        "bluesky": post_to_bluesky(text),
-        "mastodon": post_to_mastodon(text),
+        "telegram": post_to_telegram(text, image_url),
+        "discord": post_to_discord(text, image_url),
+        "bluesky": post_to_bluesky(text, image_url),
+        "mastodon": post_to_mastodon(text, image_url),
     }
     success = sum(1 for v in results.values() if v)
-    logger.info(f"📢 Posted to {success}/4 platforms: {results}")
+    logger.info(f"📢 Posted to {success}/4 platforms (image: {bool(image_url)})")
     return results
 
 # ============================================
@@ -338,8 +441,9 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v3B\nTotal earned: ${db.total():.2f}\n\n"
-                f"Commands:\n/platforms\n/post <topic> <type>\n/price BTC\n/ai")
+        tg_send(f"🤖 NOH4Q Agent v4A (Visual)\nTotal earned: ${db.total():.2f}\n\n"
+                f"Commands:\n/post <topic> <type> - post with image\n/noimage <topic> <type> - post text only\n"
+                f"/platforms\n/price BTC\n/ai")
 
     elif text == "/platforms":
         status = "📢 Platform Status:\n"
@@ -370,14 +474,31 @@ def handle_command(text, chat_id):
         else:
             topic = " ".join(parts[:-1])
             ctype = parts[-1]
-            tg_send(f"🧠 Generating and posting to 4 platforms...")
-            result = generate_content(topic, ctype)
+            tg_send(f"🎨 Generating text + image for '{topic}'...")
+            result = generate_content(topic, ctype, with_image=True)
             if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed. All providers busy. Try again in 30 seconds.")
+                tg_send("❌ AI failed. Try again in 30 seconds.")
             else:
-                results = post_to_all_platforms(result['body'])
+                tg_send(f"✅ Image generated. Posting to 4 platforms...")
+                results = post_to_all_platforms(result['body'], result['image_url'])
                 success = sum(1 for v in results.values() if v)
-                tg_send(f"✅ Posted to {success}/4 platforms!\n{json.dumps(results, indent=2)}")
+                tg_send(f"✅ Posted to {success}/4 platforms!")
+
+    elif text.startswith("/noimage "):
+        parts = text[9:].strip().split()
+        if len(parts) < 2:
+            tg_send("Usage: /noimage <topic> <type>")
+        else:
+            topic = " ".join(parts[:-1])
+            ctype = parts[-1]
+            tg_send(f"🧠 Generating text only for '{topic}'...")
+            result = generate_content(topic, ctype, with_image=False)
+            if "AI unavailable" in result['body']:
+                tg_send("❌ AI failed.")
+            else:
+                results = post_to_all_platforms(result['body'], "")
+                success = sum(1 for v in results.values() if v)
+                tg_send(f"✅ Posted to {success}/4 platforms (no image)!")
 
     elif text.startswith("/price "):
         symbol = text[7:].strip().upper()
@@ -387,34 +508,34 @@ def handle_command(text, chat_id):
         else:
             tg_send(f"💰 {result['symbol']}: ${result['price']:,.2f}")
 
-    elif text == "/NOH4Q":
-        tg_send("🔓 Unlocked.")
-
     else:
-        tg_send(f"Unknown: {text}\nTry /platforms, /post, /price, /ai")
+        tg_send(f"Unknown: {text}\nTry /post, /noimage, /platforms, /ai")
 
 # ============================================
-# WORK LOOP (Every 4 hours)
+# WORK LOOP (Every 4 hours, with images)
 # ============================================
 def work_loop():
     while True:
         try:
+            # 1. Get BTC price
             price = get_crypto_price("BTC")
             if "price" in price:
                 logger.info(f"BTC: ${price['price']:,.2f}")
 
-            idea = ai_ask("Give one short money-making idea in one sentence.")
-            db.log("ai", idea)
+            # 2. Generate + post content with image
+            topic = random.choice(["crypto trading", "AI automation", "passive income", "blockchain"])
+            content = generate_content(topic, "post", with_image=True)
 
-            topic = random.choice(["crypto trading", "AI automation", "passive income"])
-            content = generate_content(topic, "post")
             if "AI unavailable" not in content['body']:
-                post_to_all_platforms(f"🤖 {content['body']}")
+                post_to_all_platforms(content['body'], content['image_url'])
 
+            # 3. Earnings log
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
-            tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
 
-            time.sleep(14400)
+            # 4. Telegram ping
+            tg_send(f"💼 Cycle done (with image). BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
+
+            time.sleep(14400)  # 4 hours
         except Exception as e:
             logger.error(f"Work loop error: {e}")
             time.sleep(300)
@@ -426,7 +547,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return f"<h1>🤖 NOH4Q Agent v3B</h1><p>Earned: ${db.total():.2f}</p>"
+    return f"<h1>🤖 NOH4Q Agent v4A (Visual)</h1><p>Earned: ${db.total():.2f}</p>"
 
 @app.route("/health")
 def health():
@@ -439,10 +560,10 @@ def api_status():
 # ============================================
 # START
 # ============================================
-logger.info("🚀 NOH4Q Phase 3B COMPLETE starting...")
+logger.info("🚀 NOH4Q Phase 4A (Visual Content) starting...")
 threading.Thread(target=tg_poll, daemon=True).start()
 threading.Thread(target=work_loop, daemon=True).start()
-logger.info("✅ Multi-platform posting enabled (4 platforms)")
+logger.info("✅ Multi-platform + image generation enabled")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
