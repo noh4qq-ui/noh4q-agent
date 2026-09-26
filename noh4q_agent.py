@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 3B COMPLETE (Fixed HF + Improved AI)
+NOH4Q AGENT - PHASE 3B COMPLETE (Fixed AI Models)
 Posts to: Telegram + Discord + Bluesky + Mastodon
 """
 
@@ -82,12 +82,12 @@ db = DB()
 # AI BRAIN (Multi-Provider Fallback - FIXED)
 # ============================================
 def ai_ask(prompt):
-    # --- 1. Gemini ---
+    # --- 1. Gemini (Updated Model) ---
     if GEMINI_KEY:
         for attempt in range(2):
             try:
                 r = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_KEY}",
                     json={
                         "contents": [{"parts": [{"text": prompt}]}],
                         "safetySettings": [
@@ -115,14 +115,14 @@ def ai_ask(prompt):
                 logger.warning(f"Gemini exception: {e}")
                 break
 
-    # --- 2. OpenRouter ---
+    # --- 2. OpenRouter (Updated Free Model) ---
     if OPENROUTER_KEY:
         try:
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
                 json={
-                    "model": "meta-llama/llama-3.3-70b-instruct:free",
+                    "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
                     "messages": [{"role": "user", "content": prompt}]
                 },
                 timeout=45
@@ -135,14 +135,14 @@ def ai_ask(prompt):
         except Exception as e:
             logger.warning(f"OpenRouter exception: {e}")
 
-    # --- 3. Cohere ---
+    # --- 3. Cohere (Updated Model) ---
     if COHERE_KEY:
         try:
             time.sleep(2)
             r = requests.post(
                 "https://api.cohere.com/v1/chat",
                 headers={"Authorization": f"Bearer {COHERE_KEY}"},
-                json={"model": "command-r-plus", "message": prompt},
+                json={"model": "command-r-08-2024", "message": prompt},
                 timeout=45
             )
             if r.status_code == 200:
@@ -153,10 +153,9 @@ def ai_ask(prompt):
         except Exception as e:
             logger.warning(f"Cohere exception: {e}")
 
-    # --- 4. Hugging Face (FIXED - New endpoint) ---
+    # --- 4. Hugging Face (Updated Router Endpoint) ---
     if HF_KEY:
         try:
-            # FIXED: Use the new router endpoint
             r = requests.post(
                 "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3",
                 headers={"Authorization": f"Bearer {HF_KEY}"},
