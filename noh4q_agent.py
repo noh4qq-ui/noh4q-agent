@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - PHASE 4B (Telegraph + Beehiiv Blog Integration)
-Posts to: Telegram + Discord + Bluesky + Mastodon
-With AI-generated images and Blog publishing (Telegraph + Beehiiv)
+NOH4Q AGENT - PHASE 4C (FOREX Paper Trading + Everything Else)
+Social: Telegram + Discord + Bluesky + Mastodon
+Blogs: Telegraph + Beehiiv
+Trading: FOREX Paper Trading (Frankfurter API)
 """
 
 import os
@@ -35,6 +36,12 @@ MASTODON_TOKEN = os.getenv("MASTODON_TOKEN", "")
 BEEHIIV_API_KEY = os.getenv("BEEHIIV_API_KEY", "")
 BEEHIIV_PUBLICATION_ID = os.getenv("BEEHIIV_PUBLICATION_ID", "")
 
+# FOREX settings
+FOREX_START_BALANCE = float(os.getenv("FOREX_START_BALANCE", "1000"))
+FOREX_RISK_PER_TRADE = float(os.getenv("FOREX_RISK_PER_TRADE", "2"))  # percent
+FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CHF"]
+FOREX_PRICE_HISTORY = {}  # In-memory price history for moving averages
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -55,6 +62,11 @@ class DB:
             (id INTEGER PRIMARY KEY, topic TEXT, content_type TEXT, body TEXT, image_url TEXT, ts TEXT)""")
         self.c.execute("""CREATE TABLE IF NOT EXISTS settings
             (key TEXT PRIMARY KEY, value TEXT)""")
+        self.c.execute("""CREATE TABLE IF NOT EXISTS forex_trades
+            (id INTEGER PRIMARY KEY, pair TEXT, side TEXT, entry_price REAL,
+             exit_price REAL, units REAL, pnl REAL, status TEXT, ts TEXT)""")
+        self.c.execute("""CREATE TABLE IF NOT EXISTS forex_price_history
+            (id INTEGER PRIMARY KEY, pair TEXT, price REAL, ts TEXT)""")
         self.conn.commit()
 
     def log(self, etype, message):
@@ -72,10 +84,42 @@ class DB:
                        (symbol, price, datetime.now().isoformat()))
         self.conn.commit()
 
+    def save_forex_price(self, pair, price):
+        self.c.execute("INSERT INTO forex_price_history (pair, price, ts) VALUES (?,?,?)",
+                       (pair, price, datetime.now().isoformat()))
+        self.conn.commit()
+
+    def get_forex_history(self, pair, limit=50):
+        self.c.execute("SELECT price, ts FROM forex_price_history WHERE pair=? ORDER BY id DESC LIMIT ?",
+                       (pair, limit))
+        return list(reversed(self.c.fetchall()))
+
     def save_content(self, topic, content_type, body, image_url=""):
         self.c.execute("INSERT INTO content (topic, content_type, body, image_url, ts) VALUES (?,?,?,?,?)",
                        (topic, content_type, body, image_url, datetime.now().isoformat()))
         self.conn.commit()
+
+    def save_forex_trade(self, pair, side, entry, exit_price, units, pnl, status):
+        self.c.execute("INSERT INTO forex_trades (pair, side, entry_price, exit_price, units, pnl, status, ts) VALUES (?,?,?,?,?,?,?,?)",
+                       (pair, side, entry, exit_price, units, pnl, status, datetime.now().isoformat()))
+        self.conn.commit()
+
+    def get_open_forex_trades(self):
+        self.c.execute("SELECT id, pair, side, entry_price, units FROM forex_trades WHERE status='open'")
+        return self.c.fetchall()
+
+    def close_forex_trade(self, trade_id, exit_price, pnl):
+        self.c.execute("UPDATE forex_trades SET exit_price=?, pnl=?, status='closed' WHERE id=?",
+                       (exit_price, pnl, trade_id))
+        self.conn.commit()
+
+    def get_forex_stats(self):
+        self.c.execute("SELECT COUNT(*), COALESCE(SUM(pnl),0) FROM forex_trades WHERE status='closed'")
+        count, total_pnl = self.c.fetchone()
+        self.c.execute("SELECT COUNT(*) FROM forex_trades WHERE status='closed' AND pnl > 0")
+        wins = self.c.fetchone()[0]
+        return {"total_trades": count, "total_pnl": total_pnl, "wins": wins,
+                "win_rate": (wins / count * 100) if count > 0 else 0}
 
     def get_setting(self, key, default=""):
         self.c.execute("SELECT value FROM settings WHERE key=?", (key,))
@@ -174,14 +218,12 @@ def ai_ask(prompt):
     return "AI unavailable - fallback mode"
 
 # ============================================
-# IMAGE GENERATION (Pollinations AI)
+# IMAGE GENERATION
 # ============================================
 def generate_image_url(prompt, width=1024, height=1024):
     clean_prompt = prompt[:200].strip()
     encoded = urllib.parse.quote(clean_prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&model=flux"
-    logger.info(f"🎨 Image URL: {url[:80]}...")
-    return url
+    return f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&model=flux"
 
 def create_image_prompt(topic, body):
     image_prompt = ai_ask(
@@ -190,11 +232,10 @@ def create_image_prompt(topic, body):
     )
     if "AI unavailable" in image_prompt:
         image_prompt = f"Digital art of {topic}, modern style, vibrant colors"
-    logger.info(f"🎨 Image prompt: {image_prompt[:80]}")
     return image_prompt.strip()[:200]
 
 # ============================================
-# MARKET DATA
+# CRYPTO PRICE
 # ============================================
 def get_crypto_price(symbol="BTC"):
     crypto_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "DOGE": "DOGE"}
@@ -208,6 +249,146 @@ def get_crypto_price(symbol="BTC"):
     except Exception as e:
         logger.warning(f"Coinbase failed: {e}")
     return {"error": "Price unavailable"}
+
+# ============================================
+# FOREX PRICES (Frankfurter API - No Key Needed)
+# ============================================
+def get_forex_price(pair="EUR/USD"):
+    """Fetch live forex rate from Frankfurter API. No key, no signup."""
+    try:
+        base, quote = pair.split("/")
+        url = f"https://api.frankfurter.app/latest?from={base}&to={quote}"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            rate = data["rates"].get(quote)
+            if rate:
+                db.save_forex_price(pair, float(rate))
+                return {"pair": pair, "price": float(rate), "date": data.get("date", "")}
+    except Exception as e:
+        logger.warning(f"Frankfurter {pair} failed: {e}")
+    return {"error": f"Could not fetch {pair}"}
+
+# ============================================
+# FOREX PAPER TRADING ENGINE
+# ============================================
+def get_paper_balance():
+    """Get current paper trading balance."""
+    bal = db.get_setting("forex_balance", "")
+    if not bal:
+        db.set_setting("forex_balance", str(FOREX_START_BALANCE))
+        return FOREX_START_BALANCE
+    return float(bal)
+
+def set_paper_balance(new_balance):
+    db.set_setting("forex_balance", str(round(new_balance, 2)))
+
+def calculate_sma(prices, period):
+    """Simple Moving Average."""
+    if len(prices) < period:
+        return None
+    return sum(prices[-period:]) / period
+
+def forex_signal(pair):
+    """Generate BUY/SELL/HOLD signal using SMA crossover + momentum."""
+    history = db.get_forex_history(pair, limit=60)
+    if len(history) < 20:
+        return "hold", 0
+
+    prices = [h[0] for h in history]
+    sma_short = calculate_sma(prices, 5)
+    sma_long = calculate_sma(prices, 20)
+
+    if sma_short is None or sma_long is None:
+        return "hold", 0
+
+    # SMA crossover
+    if sma_short > sma_long * 1.001:
+        return "buy", min((sma_short - sma_long) / sma_long * 100, 1.0)
+    elif sma_short < sma_long * 0.999:
+        return "sell", min((sma_long - sma_short) / sma_long * 100, 1.0)
+    return "hold", 0
+
+def execute_paper_trade(pair):
+    """Execute a paper forex trade based on SMA signal."""
+    signal, strength = forex_signal(pair)
+    if signal == "hold":
+        return None
+
+    price_data = get_forex_price(pair)
+    if "error" in price_data:
+        return None
+
+    price = price_data["price"]
+    balance = get_paper_balance()
+    risk_amount = balance * (FOREX_RISK_PER_TRADE / 100)
+    units = round(risk_amount / price, 4) if price > 0 else 0
+
+    if units <= 0:
+        return None
+
+    # Check if we already have an open trade on this pair
+    open_trades = db.get_open_forex_trades()
+    for t in open_trades:
+        if t[1] == pair:
+            return None  # Already open
+
+    db.save_forex_trade(pair, signal, price, 0, units, 0, "open")
+    logger.info(f"📈 Opened {signal.upper()} {pair} @ {price:.5f}")
+
+    return {"pair": pair, "side": signal, "price": price, "units": units}
+
+def monitor_paper_trades():
+    """Check open trades for stop-loss / take-profit."""
+    open_trades = db.get_open_forex_trades()
+    for trade in open_trades:
+        trade_id, pair, side, entry, units = trade
+        price_data = get_forex_price(pair)
+        if "error" in price_data:
+            continue
+        current = price_data["price"]
+
+        # P&L calculation
+        if side == "buy":
+            pnl = (current - entry) * units
+            pct = (current - entry) / entry * 100
+        else:
+            pnl = (entry - current) * units
+            pct = (entry - current) / entry * 100
+
+        # Close if +1.5% profit or -1% loss
+        if pct >= 1.5 or pct <= -1.0:
+            db.close_forex_trade(trade_id, current, round(pnl, 2))
+            balance = get_paper_balance() + pnl
+            set_paper_balance(balance)
+            db.earn("forex_paper", max(pnl, 0))
+            logger.info(f"📉 Closed {side.upper()} {pair} @ {current:.5f} | PnL: ${pnl:.2f}")
+            return {
+                "pair": pair, "side": side, "entry": entry,
+                "exit": current, "pnl": pnl, "balance": balance
+            }
+    return None
+
+def forex_report():
+    """Generate a short forex status report."""
+    stats = db.get_forex_stats()
+    balance = get_paper_balance()
+    open_trades = db.get_open_forex_trades()
+
+    report = f"📊 FOREX PAPER TRADING\n"
+    report += f"━━━━━━━━━━━━━━━━━━━\n"
+    report += f"💰 Balance: ${balance:.2f}\n"
+    report += f"📈 Total PnL: ${stats['total_pnl']:.2f}\n"
+    report += f"🎯 Trades: {stats['total_trades']}\n"
+    report += f"✅ Win Rate: {stats['win_rate']:.1f}%\n"
+    report += f"🔓 Open Positions: {len(open_trades)}\n"
+
+    if open_trades:
+        report += f"\n💼 Open:\n"
+        for t in open_trades:
+            report += f"  • {t[1]} {t[2].upper()} @ {t[3]:.5f}\n"
+
+    return report
 
 # ============================================
 # CONTENT GENERATION
@@ -224,8 +405,7 @@ def generate_content(topic, content_type="post", with_image=True):
 
     image_url = ""
     if with_image and "AI unavailable" not in body:
-        image_prompt = create_image_prompt(topic, body)
-        image_url = generate_image_url(image_prompt)
+        image_url = generate_image_url(create_image_prompt(topic, body))
 
     db.save_content(topic, content_type, body, image_url)
     return {"topic": topic, "type": content_type, "body": body, "image_url": image_url}
@@ -243,18 +423,14 @@ def post_to_telegram(text, image_url=""):
                 json={"chat_id": TELEGRAM_CHANNEL_ID, "photo": image_url, "caption": text[:1024]}, timeout=30
             )
             if r.status_code == 200:
-                logger.info("✅ Telegram (with image)")
                 return True
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text[:4000]}, timeout=10
         )
-        if r.status_code == 200:
-            logger.info("✅ Telegram (text)")
-            return True
-    except Exception as e:
-        logger.warning(f"Telegram failed: {e}")
-    return False
+        return r.status_code == 200
+    except:
+        return False
 
 def post_to_discord(text, image_url=""):
     if not DISCORD_WEBHOOK:
@@ -264,12 +440,9 @@ def post_to_discord(text, image_url=""):
         if image_url:
             payload["embeds"] = [{"image": {"url": image_url}}]
         r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=30)
-        if r.status_code in [200, 204]:
-            logger.info("✅ Discord")
-            return True
-    except Exception as e:
-        logger.warning(f"Discord failed: {e}")
-    return False
+        return r.status_code in [200, 204]
+    except:
+        return False
 
 def post_to_bluesky(text, image_url=""):
     if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
@@ -290,28 +463,24 @@ def post_to_bluesky(text, image_url=""):
             try:
                 img_resp = requests.get(image_url, timeout=60)
                 if img_resp.status_code == 200 and len(img_resp.content) > 1000:
-                    upload_resp = requests.post(
+                    up = requests.post(
                         "https://bsky.social/xrpc/com.atproto.repo.uploadBlob",
                         headers={"Authorization": f"Bearer {jwt}", "Content-Type": "image/png"},
                         data=img_resp.content, timeout=60
                     )
-                    if upload_resp.status_code == 200:
-                        blob = upload_resp.json()["blob"]
+                    if up.status_code == 200:
                         record["embed"] = {"$type": "app.bsky.embed.images",
-                                          "images": [{"alt": text[:100], "image": blob}]}
-            except Exception as e:
-                logger.warning(f"Bluesky image error: {e}")
+                                          "images": [{"alt": text[:100], "image": up.json()["blob"]}]}
+            except:
+                pass
         r2 = requests.post(
             "https://bsky.social/xrpc/com.atproto.repo.createRecord",
             headers={"Authorization": f"Bearer {jwt}"},
             json={"repo": did, "collection": "app.bsky.feed.post", "record": record}, timeout=30
         )
-        if r2.status_code == 200:
-            logger.info("✅ Bluesky")
-            return True
-    except Exception as e:
-        logger.warning(f"Bluesky failed: {e}")
-    return False
+        return r2.status_code == 200
+    except:
+        return False
 
 def post_to_mastodon(text, image_url=""):
     if not MASTODON_URL or not MASTODON_TOKEN:
@@ -322,16 +491,16 @@ def post_to_mastodon(text, image_url=""):
             try:
                 img_resp = requests.get(image_url, timeout=60)
                 if img_resp.status_code == 200 and len(img_resp.content) > 1000:
-                    upload_resp = requests.post(
+                    up = requests.post(
                         f"{MASTODON_URL}/api/v2/media",
                         headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
-                        files={"file": ("image.png", img_resp.content, "image/png")},
+                        files={"file": ("i.png", img_resp.content, "image/png")},
                         data={"description": text[:100]}, timeout=60
                     )
-                    if upload_resp.status_code in [200, 202]:
-                        media_ids.append(upload_resp.json()["id"])
-            except Exception as e:
-                logger.warning(f"Mastodon image error: {e}")
+                    if up.status_code in [200, 202]:
+                        media_ids.append(up.json()["id"])
+            except:
+                pass
         payload = {"status": text[:500], "visibility": "public"}
         if media_ids:
             payload["media_ids"] = media_ids
@@ -340,12 +509,9 @@ def post_to_mastodon(text, image_url=""):
             headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
             json=payload, timeout=30
         )
-        if r.status_code == 200:
-            logger.info("✅ Mastodon")
-            return True
-    except Exception as e:
-        logger.warning(f"Mastodon failed: {e}")
-    return False
+        return r.status_code == 200
+    except:
+        return False
 
 def post_to_all_platforms(text, image_url=""):
     results = {
@@ -354,137 +520,88 @@ def post_to_all_platforms(text, image_url=""):
         "bluesky": post_to_bluesky(text, image_url),
         "mastodon": post_to_mastodon(text, image_url),
     }
-    success = sum(1 for v in results.values() if v)
-    logger.info(f"📢 Posted to {success}/4 platforms")
     return results
 
 # ============================================
-# TELEGRAPH BLOG (No signup, no verification)
+# TELEGRAPH
 # ============================================
 def get_telegraph_token():
-    """Get or create a Telegraph access token (cached in DB)."""
     token = db.get_setting("telegraph_token", "")
     if token:
         return token
     try:
         r = requests.post(
             "https://api.telegra.ph/createAccount",
-            data={
-                "short_name": "NOH4Q",
-                "author_name": "NOH4Q Agent"
-            },
-            timeout=15
+            data={"short_name": "NOH4Q", "author_name": "NOH4Q Agent"}, timeout=15
         )
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("ok"):
-                token = data["result"]["access_token"]
-                db.set_setting("telegraph_token", token)
-                logger.info("✅ Telegraph account created")
-                return token
-    except Exception as e:
-        logger.warning(f"Telegraph token failed: {e}")
+        if r.status_code == 200 and r.json().get("ok"):
+            token = r.json()["result"]["access_token"]
+            db.set_setting("telegraph_token", token)
+            return token
+    except:
+        pass
     return ""
 
 def markdown_to_telegraph_nodes(text):
-    """Convert simple text into Telegraph Node format."""
     nodes = []
     for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue
-        # Headings
         if line.startswith("### "):
             nodes.append({"tag": "h4", "children": [line[4:]]})
         elif line.startswith("## "):
             nodes.append({"tag": "h3", "children": [line[3:]]})
         elif line.startswith("# "):
             nodes.append({"tag": "h3", "children": [line[2:]]})
-        # Bullet lists
         elif line.startswith("- ") or line.startswith("* "):
-            nodes.append({"tag": "ul", "children": [
-                {"tag": "li", "children": [line[2:]]}
-            ]})
-        # Regular paragraph
+            nodes.append({"tag": "ul", "children": [{"tag": "li", "children": [line[2:]]}]})
         else:
             nodes.append({"tag": "p", "children": [line]})
     return nodes
 
-def publish_to_telegraph(title, article_body):
-    """Publish an article to Telegraph and return the URL."""
+def publish_to_telegraph(title, body):
     token = get_telegraph_token()
     if not token:
         return None
     try:
-        nodes = markdown_to_telegraph_nodes(article_body)
         r = requests.post(
             "https://api.telegra.ph/createPage",
             data={
                 "access_token": token,
                 "title": title[:256],
                 "author_name": "NOH4Q Agent",
-                "content": json.dumps(nodes),
+                "content": json.dumps(markdown_to_telegraph_nodes(body)),
                 "return_content": "false"
-            },
-            timeout=20
+            }, timeout=20
         )
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("ok"):
-                url = data["result"]["url"]
-                logger.info(f"✅ Telegraph: {url}")
-                return url
-        logger.warning(f"Telegraph publish failed: {r.text[:150]}")
-    except Exception as e:
-        logger.warning(f"Telegraph error: {e}")
+        if r.status_code == 200 and r.json().get("ok"):
+            return r.json()["result"]["url"]
+    except:
+        pass
     return None
 
-# ============================================
-# BEEHIIV BLOG (Requires Stripe ID verification)
-# ============================================
-def publish_to_beehiiv(title, article_body):
+def publish_to_beehiiv(title, body):
     if not BEEHIIV_API_KEY or not BEEHIIV_PUBLICATION_ID:
-        logger.info("⏭️ Beehiiv skipped (no API key)")
         return False
-    url = f"https://api.beehiiv.com/v2/publications/{BEEHIIV_PUBLICATION_ID}/posts"
-    headers = {
-        "Authorization": f"Bearer {BEEHIIV_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "title": title,
-        "body_content": article_body.replace("\n", "<br>"),
-        "status": "draft"
-    }
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
-        if r.status_code == 201:
-            logger.info("✅ Beehiiv (draft)")
-            return True
-        else:
-            logger.warning(f"Beehiiv failed: {r.text[:150]}")
-    except Exception as e:
-        logger.warning(f"Beehiiv error: {e}")
-    return False
+        r = requests.post(
+            f"https://api.beehiiv.com/v2/publications/{BEEHIIV_PUBLICATION_ID}/posts",
+            headers={"Authorization": f"Bearer {BEEHIIV_API_KEY}", "Content-Type": "application/json"},
+            json={"title": title, "body_content": body.replace("\n", "<br>"), "status": "draft"},
+            timeout=30
+        )
+        return r.status_code == 201
+    except:
+        return False
 
-# ============================================
-# PUBLISH TO BOTH BLOGS
-# ============================================
 def publish_article(topic, body):
-    """Publish to both Telegraph and Beehiiv. Returns URLs."""
     title = f"AI Insights: {topic.title()}"
-    results = {"title": title, "telegraph": None, "beehiiv": False}
-
-    # Telegraph (always try)
-    url = publish_to_telegraph(title, body)
-    if url:
-        results["telegraph"] = url
-
-    # Beehiiv (if keys available)
-    if BEEHIIV_API_KEY and BEEHIIV_PUBLICATION_ID:
-        results["beehiiv"] = publish_to_beehiiv(title, body)
-
-    return results
+    return {
+        "title": title,
+        "telegraph": publish_to_telegraph(title, body),
+        "beehiiv": publish_to_beehiiv(title, body) if BEEHIIV_API_KEY else False
+    }
 
 # ============================================
 # TELEGRAM CONTROL
@@ -497,8 +614,8 @@ def tg_send(text):
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10
         )
-    except Exception as e:
-        logger.warning(f"TG send failed: {e}")
+    except:
+        pass
 
 def tg_poll():
     offset = 0
@@ -516,8 +633,8 @@ def tg_poll():
                     chat_id = str(msg.get("chat", {}).get("id", ""))
                     if text:
                         handle_command(text, chat_id)
-        except Exception as e:
-            logger.warning(f"TG poll failed: {e}")
+        except:
+            pass
         time.sleep(2)
 
 def handle_command(text, chat_id):
@@ -525,12 +642,15 @@ def handle_command(text, chat_id):
     TELEGRAM_CHAT_ID = chat_id
 
     if text == "/start":
-        tg_send(f"🤖 NOH4Q Agent v4B (Telegraph + Beehiiv)\nEarned: ${db.total():.2f}\n\n"
+        tg_send(f"🤖 NOH4Q Agent v4C (FOREX)\nEarned: ${db.total():.2f}\n\n"
                 f"Commands:\n"
                 f"/post <topic> <type>\n"
-                f"/blog <topic> - publish to Telegraph + Beehiiv\n"
+                f"/blog <topic>\n"
+                f"/forex - live forex prices\n"
+                f"/trade <pair> - execute paper trade\n"
+                f"/balance - paper balance\n"
+                f"/fxreport - trading report\n"
                 f"/platforms\n"
-                f"/price BTC\n"
                 f"/ai")
 
     elif text == "/platforms":
@@ -539,20 +659,46 @@ def handle_command(text, chat_id):
         status += f"  Discord: {'✅' if DISCORD_WEBHOOK else '❌'}\n"
         status += f"  Bluesky: {'✅' if BLUESKY_HANDLE else '❌'}\n"
         status += f"  Mastodon: {'✅' if MASTODON_TOKEN else '❌'}\n"
-        status += f"  Telegraph: ✅ (always on)\n"
-        status += f"  Beehiiv: {'✅' if BEEHIIV_API_KEY else '❌ (no key)'}\n"
+        status += f"  Telegraph: ✅\n"
+        status += f"  Beehiiv: {'✅' if BEEHIIV_API_KEY else '❌'}\n"
+        status += f"  FOREX: ✅ (paper trading)"
         tg_send(status)
 
     elif text == "/ai":
-        status = "🧠 AI Providers:\n"
-        status += f"  Gemini: {'✅' if GEMINI_KEY else '❌'}\n"
-        status += f"  OpenRouter: {'✅' if OPENROUTER_KEY else '❌'}\n"
-        status += f"  Cohere: {'✅' if COHERE_KEY else '❌'}\n"
-        status += f"  HuggingFace: {'✅' if HF_KEY else '❌'}\n"
-        tg_send(status)
+        tg_send("🧠 AI Providers:\n"
+                f"  Gemini: {'✅' if GEMINI_KEY else '❌'}\n"
+                f"  OpenRouter: {'✅' if OPENROUTER_KEY else '❌'}\n"
+                f"  Cohere: {'✅' if COHERE_KEY else '❌'}\n"
+                f"  HuggingFace: {'✅' if HF_KEY else '❌'}")
+
+    elif text == "/forex" or text == "/forex prices":
+        msg = "💱 LIVE FOREX PRICES\n"
+        for pair in FOREX_PAIRS:
+            data = get_forex_price(pair)
+            if "error" not in data:
+                msg += f"  {pair}: {data['price']:.5f}\n"
+        tg_send(msg)
+
+    elif text.startswith("/trade "):
+        pair = text[7:].strip().upper().replace("-", "/")
+        if pair not in FOREX_PAIRS:
+            tg_send(f"Pair must be one of: {', '.join(FOREX_PAIRS)}")
+        else:
+            trade = execute_paper_trade(pair)
+            if trade:
+                tg_send(f"✅ Opened {trade['side'].upper()} {trade['pair']} @ {trade['price']:.5f}")
+            else:
+                tg_send(f"⏸️ No signal for {pair} (HOLD) or trade already open.")
+
+    elif text == "/balance":
+        balance = get_paper_balance()
+        tg_send(f"💰 Paper Balance: ${balance:.2f}\nStarted with: ${FOREX_START_BALANCE:.2f}")
+
+    elif text == "/fxreport":
+        tg_send(forex_report())
 
     elif text == "/report":
-        tg_send(f"📊 Report\nEarned: ${db.total():.2f}")
+        tg_send(f"📊 Total Earnings: ${db.total():.2f}\n" + forex_report())
 
     elif text.startswith("/ask "):
         tg_send(f"🧠 {ai_ask(text[5:])}")
@@ -560,11 +706,11 @@ def handle_command(text, chat_id):
     elif text.startswith("/post "):
         parts = text[6:].strip().split()
         if len(parts) < 2:
-            tg_send("Usage: /post <topic> <article|tweet_thread|post|script>")
+            tg_send("Usage: /post <topic> <type>")
         else:
             topic = " ".join(parts[:-1])
             ctype = parts[-1]
-            tg_send(f"🎨 Generating '{topic}'...")
+            tg_send(f"🎨 Generating...")
             result = generate_content(topic, ctype, with_image=True)
             if "AI unavailable" in result['body']:
                 tg_send("❌ AI failed.")
@@ -575,23 +721,18 @@ def handle_command(text, chat_id):
 
     elif text.startswith("/blog "):
         topic = text[6:].strip()
-        if not topic:
-            tg_send("Usage: /blog <topic>")
+        tg_send(f"📝 Writing article about '{topic}'...")
+        result = generate_content(topic, "article", with_image=False)
+        if "AI unavailable" in result['body']:
+            tg_send("❌ AI failed.")
         else:
-            tg_send(f"📝 Writing article about '{topic}'...")
-            result = generate_content(topic, "article", with_image=False)
-            if "AI unavailable" in result['body']:
-                tg_send("❌ AI failed.")
-            else:
-                pub = publish_article(topic, result['body'])
-                msg = f"✅ Published!\n\n"
-                if pub['telegraph']:
-                    msg += f"📖 Telegraph: {pub['telegraph']}\n"
-                if pub['beehiiv']:
-                    msg += f"📰 Beehiiv: draft created\n"
-                elif not BEEHIIV_API_KEY:
-                    msg += f"📰 Beehiiv: skipped (no key)\n"
-                tg_send(msg)
+            pub = publish_article(topic, result['body'])
+            msg = "✅ Published!\n"
+            if pub['telegraph']:
+                msg += f"📖 {pub['telegraph']}\n"
+            if pub['beehiiv']:
+                msg += "📰 Beehiiv draft created"
+            tg_send(msg)
 
     elif text.startswith("/price "):
         symbol = text[7:].strip().upper()
@@ -602,33 +743,50 @@ def handle_command(text, chat_id):
             tg_send(f"💰 {result['symbol']}: ${result['price']:,.2f}")
 
     else:
-        tg_send(f"Unknown: {text}\nTry /post, /blog, /platforms, /ai, /price")
+        tg_send(f"Unknown: {text}\nTry /forex, /trade, /balance, /fxreport")
 
 # ============================================
-# WORK LOOP
+# WORK LOOP (Every 4 hours)
 # ============================================
 def work_loop():
     while True:
         try:
+            # 1. Crypto
             price = get_crypto_price("BTC")
-            if "price" in price:
-                logger.info(f"BTC: ${price['price']:,.2f}")
 
-            # Generate social post with image
+            # 2. FOREX: fetch prices + monitor trades + auto-trade
+            for pair in FOREX_PAIRS:
+                get_forex_price(pair)
+
+            # Auto-trade on the top pair
+            trade_opened = execute_paper_trade("EUR/USD")
+
+            # Monitor open positions
+            closed = monitor_paper_trades()
+
+            # 3. Social content
             topic = random.choice(["crypto trading", "AI automation", "passive income", "blockchain"])
             content = generate_content(topic, "post", with_image=True)
             if "AI unavailable" not in content['body']:
                 post_to_all_platforms(content['body'], content['image_url'])
 
-            # Generate article and publish to blogs
+            # 4. Blog article
             article = generate_content(topic, "article", with_image=False)
             if "AI unavailable" not in article['body']:
                 pub = publish_article(topic, article['body'])
                 if pub['telegraph']:
-                    tg_send(f"📖 New Telegraph article: {pub['telegraph']}")
+                    tg_send(f"📖 New article: {pub['telegraph']}")
 
+            # 5. Notify trades
+            if trade_opened:
+                tg_send(f"📈 Auto-trade: {trade_opened['side'].upper()} {trade_opened['pair']} @ {trade_opened['price']:.5f}")
+            if closed:
+                tg_send(f"📉 Closed: {closed['side'].upper()} {closed['pair']} PnL: ${closed['pnl']:.2f}")
+
+            # 6. Summary
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
-            tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | Total: ${db.total():.2f}")
+            balance = get_paper_balance()
+            tg_send(f"💼 Cycle done. BTC: ${price.get('price', 0):,.2f} | FX Balance: ${balance:.2f}")
 
             time.sleep(14400)
         except Exception as e:
@@ -642,7 +800,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return f"<h1>🤖 NOH4Q Agent v4B</h1><p>Earned: ${db.total():.2f}</p>"
+    return f"<h1>🤖 NOH4Q Agent v4C (FOREX)</h1><p>Earned: ${db.total():.2f}</p>"
 
 @app.route("/health")
 def health():
@@ -650,15 +808,15 @@ def health():
 
 @app.route("/api/status")
 def api_status():
-    return jsonify({"alive": True, "earned": db.total()})
+    return jsonify({"alive": True, "earned": db.total(), "forex": get_forex_stats() if False else db.get_forex_stats()})
 
 # ============================================
 # START
 # ============================================
-logger.info("🚀 NOH4Q Phase 4B (Telegraph + Beehiiv) starting...")
+logger.info("🚀 NOH4Q Phase 4C (FOREX) starting...")
 threading.Thread(target=tg_poll, daemon=True).start()
 threading.Thread(target=work_loop, daemon=True).start()
-logger.info("✅ Telegraph + Beehiiv + 4 social platforms enabled")
+logger.info("✅ All systems enabled: Social + Blogs + FOREX")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
