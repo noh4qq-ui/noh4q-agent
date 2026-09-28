@@ -4,3 +4,6 @@ gunicorn
 yfinance
 edge-tts
 imageio-ffmpeg
+imageio
+pillow
+numpy
