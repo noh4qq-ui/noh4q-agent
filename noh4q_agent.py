@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - FINAL VERSION (Phase 4D Complete)
+NOH4Q AGENT - FINAL VERSION
 Social: Telegram + Discord + Bluesky + Mastodon
-Blogs: Telegraph + Beehiiv
+Blogs: Telegraph + Beehiiv (with affiliate injection)
 Trading: FOREX + Commodities (Gold, Silver, Oil)
-Features: Analytics + Auto-Reply + Content Queue
+Features: Analytics + Queue + Auto-Reply + Growth Engine
+Affiliates: Amazon + ClickBank
 """
 
 import os
@@ -37,14 +38,28 @@ MASTODON_TOKEN = os.getenv("MASTODON_TOKEN", "")
 BEEHIIV_API_KEY = os.getenv("BEEHIIV_API_KEY", "")
 BEEHIIV_PUBLICATION_ID = os.getenv("BEEHIIV_PUBLICATION_ID", "")
 
+# Affiliate IDs
+AMAZON_AFFILIATE_TAG = os.getenv("AMAZON_AFFILIATE_TAG", "")
+CLICKBANK_AFFILIATE_ID = os.getenv("CLICKBANK_AFFILIATE_ID", "")
+
+# Growth config
+ENABLE_BLUESKY_GROWTH = os.getenv("ENABLE_BLUESKY_GROWTH", "true").lower() == "true"
+ENABLE_MASTODON_GROWTH = os.getenv("ENABLE_MASTODON_GROWTH", "true").lower() == "true"
+MAX_FOLLOWS_PER_CYCLE = int(os.getenv("MAX_FOLLOWS_PER_CYCLE", "20"))
+MAX_LIKES_PER_CYCLE = int(os.getenv("MAX_LIKES_PER_CYCLE", "30"))
+MAX_REPLIES_PER_CYCLE = int(os.getenv("MAX_REPLIES_PER_CYCLE", "5"))
+
+# FOREX config
 FOREX_START_BALANCE = float(os.getenv("FOREX_START_BALANCE", "1000"))
 FOREX_RISK_PER_TRADE = float(os.getenv("FOREX_RISK_PER_TRADE", "2"))
 FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CHF"]
-
 COMMODITY_MAP = {
     "XAU/USD": "GC=F", "XAG/USD": "SI=F", "WTI": "CL=F",
     "BRENT": "BZ=F", "NATGAS": "NG=F", "COPPER": "HG=F",
 }
+
+NICHE_TERMS = ["crypto", "AI", "trading", "passive income", "blockchain",
+               "investing", "automation", "bitcoin", "finance", "startup"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -56,25 +71,26 @@ class DB:
     def __init__(self, path="noh4q.db"):
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.c = self.conn.cursor()
-        self.c.execute("""CREATE TABLE IF NOT EXISTS events
-            (id INTEGER PRIMARY KEY, type TEXT, message TEXT, ts TEXT)""")
-        self.c.execute("""CREATE TABLE IF NOT EXISTS earnings
-            (id INTEGER PRIMARY KEY, source TEXT, amount REAL, ts TEXT)""")
-        self.c.execute("""CREATE TABLE IF NOT EXISTS prices
-            (id INTEGER PRIMARY KEY, symbol TEXT, price REAL, ts TEXT)""")
-        self.c.execute("""CREATE TABLE IF NOT EXISTS content
-            (id INTEGER PRIMARY KEY, topic TEXT, content_type TEXT, body TEXT, image_url TEXT, ts TEXT)""")
-        self.c.execute("""CREATE TABLE IF NOT EXISTS settings
-            (key TEXT PRIMARY KEY, value TEXT)""")
-        self.c.execute("""CREATE TABLE IF NOT EXISTS forex_trades
-            (id INTEGER PRIMARY KEY, pair TEXT, side TEXT, entry_price REAL,
-             exit_price REAL, units REAL, pnl REAL, status TEXT, ts TEXT)""")
-        self.c.execute("""CREATE TABLE IF NOT EXISTS forex_price_history
-            (id INTEGER PRIMARY KEY, pair TEXT, price REAL, ts TEXT)""")
-        self.c.execute("""CREATE TABLE IF NOT EXISTS analytics
-            (id INTEGER PRIMARY KEY, platform TEXT, status TEXT, content_len INTEGER, ts TEXT)""")
-        self.c.execute("""CREATE TABLE IF NOT EXISTS queue
-            (id INTEGER PRIMARY KEY, topic TEXT, content_type TEXT, status TEXT, added_at TEXT, posted_at TEXT)""")
+        self._init_tables()
+
+    def _init_tables(self):
+        tables = [
+            "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, type TEXT, message TEXT, ts TEXT)",
+            "CREATE TABLE IF NOT EXISTS earnings (id INTEGER PRIMARY KEY, source TEXT, amount REAL, ts TEXT)",
+            "CREATE TABLE IF NOT EXISTS prices (id INTEGER PRIMARY KEY, symbol TEXT, price REAL, ts TEXT)",
+            "CREATE TABLE IF NOT EXISTS content (id INTEGER PRIMARY KEY, topic TEXT, content_type TEXT, body TEXT, image_url TEXT, ts TEXT)",
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)",
+            "CREATE TABLE IF NOT EXISTS forex_trades (id INTEGER PRIMARY KEY, pair TEXT, side TEXT, entry_price REAL, exit_price REAL, units REAL, pnl REAL, status TEXT, ts TEXT)",
+            "CREATE TABLE IF NOT EXISTS forex_price_history (id INTEGER PRIMARY KEY, pair TEXT, price REAL, ts TEXT)",
+            "CREATE TABLE IF NOT EXISTS analytics (id INTEGER PRIMARY KEY, platform TEXT, status TEXT, content_len INTEGER, ts TEXT)",
+            "CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY, topic TEXT, content_type TEXT, status TEXT, added_at TEXT, posted_at TEXT)",
+            "CREATE TABLE IF NOT EXISTS engagement (id INTEGER PRIMARY KEY, platform TEXT, action TEXT, target TEXT, ts TEXT)",
+        ]
+        for t in tables:
+            try:
+                self.c.execute(t)
+            except:
+                pass
         self.conn.commit()
 
     def log(self, etype, message):
@@ -171,16 +187,8 @@ class DB:
         try:
             self.c.execute("SELECT platform, COUNT(*), SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) FROM analytics GROUP BY platform")
             rows = self.c.fetchall()
-            summary = []
-            for platform, total, success in rows:
-                summary.append({
-                    "platform": platform,
-                    "total": total,
-                    "success": success,
-                    "fail": total - success,
-                    "success_rate": (success / total * 100) if total > 0 else 0
-                })
-            return summary
+            return [{"platform": p, "total": t, "success": s, "fail": t-s,
+                     "success_rate": (s/t*100) if t > 0 else 0} for p, t, s in rows]
         except:
             return []
 
@@ -211,6 +219,21 @@ class DB:
             return {"id": row[0], "topic": row[1], "content_type": row[2]}
         except:
             return None
+
+    def log_engagement(self, platform, action, target):
+        try:
+            self.c.execute("INSERT INTO engagement (platform, action, target, ts) VALUES (?,?,?,?)",
+                           (platform, action, target, datetime.now().isoformat()))
+            self.conn.commit()
+        except:
+            pass
+
+    def get_engagement_stats(self):
+        try:
+            self.c.execute("SELECT platform, action, COUNT(*) FROM engagement GROUP BY platform, action")
+            return [{"platform": r[0], "action": r[1], "count": r[2]} for r in self.c.fetchall()]
+        except:
+            return []
 
     def get_setting(self, key, default=""):
         try:
@@ -257,10 +280,8 @@ def ai_ask(prompt):
                 )
                 if r.status_code == 200:
                     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                elif r.status_code == 503:
+                elif r.status_code in [429, 503]:
                     time.sleep(8)
-                elif r.status_code == 429:
-                    break
             except:
                 break
 
@@ -306,8 +327,53 @@ def ai_ask(prompt):
                 return str(data)
         except:
             pass
-
     return "AI unavailable"
+
+# ============================================
+# AFFILIATE LINK INJECTION
+# ============================================
+AMAZON_PRODUCT_KEYWORDS = {
+    "trading book": "https://www.amazon.com/s?k=trading+books&tag=",
+    "trading books": "https://www.amazon.com/s?k=trading+books&tag=",
+    "ai tool": "https://www.amazon.com/s?k=ai+tools&tag=",
+    "ai tools": "https://www.amazon.com/s?k=ai+tools&tag=",
+    "crypto wallet": "https://www.amazon.com/s?k=crypto+wallet&tag=",
+    "crypto wallets": "https://www.amazon.com/s?k=crypto+wallet&tag=",
+    "trading course": "https://www.amazon.com/s?k=trading+course&tag=",
+    "investing guide": "https://www.amazon.com/s?k=investing+books&tag=",
+    "investing book": "https://www.amazon.com/s?k=investing+books&tag=",
+    "ai software": "https://www.amazon.com/s?k=ai+software&tag=",
+    "bitcoin book": "https://www.amazon.com/s?k=bitcoin+books&tag=",
+}
+
+def inject_affiliate_links(text):
+    """Inject affiliate links into text."""
+    result = text
+
+    # Amazon links
+    if AMAZON_AFFILIATE_TAG:
+        for keyword, base_url in AMAZON_PRODUCT_KEYWORDS.items():
+            if keyword.lower() in result.lower():
+                full_url = base_url + AMAZON_AFFILIATE_TAG
+                result = result.replace(
+                    keyword,
+                    f"{keyword} ([check here]({full_url}))",
+                    1
+                )
+
+    # ClickBank links
+    if CLICKBANK_AFFILIATE_ID:
+        cb_keywords = ["make money online", "passive income course", "trading course"]
+        for kw in cb_keywords:
+            if kw.lower() in result.lower():
+                hoplink = f"https://hop.clickbank.net/?affiliate={CLICKBANK_AFFILIATE_ID}"
+                result = result.replace(
+                    kw,
+                    f"{kw} ([see here]({hoplink}))",
+                    1
+                )
+
+    return result
 
 # ============================================
 # IMAGE GENERATION
@@ -346,8 +412,7 @@ def get_forex_price(pair="EUR/USD"):
         base, quote = pair.split("/")
         r = requests.get(f"https://api.frankfurter.app/latest?from={base}&to={quote}", timeout=10)
         if r.status_code == 200:
-            data = r.json()
-            rate = data["rates"].get(quote)
+            rate = r.json()["rates"].get(quote)
             if rate:
                 db.save_forex_price(pair, float(rate))
                 return {"pair": pair, "price": float(rate)}
@@ -366,7 +431,7 @@ def get_commodity_price(commodity="XAU/USD"):
         try:
             price = t.fast_info.get("last_price")
         except:
-            price = None
+            pass
         if not price:
             hist = t.history(period="1d")
             if not hist.empty:
@@ -379,7 +444,7 @@ def get_commodity_price(commodity="XAU/USD"):
     return {"error": f"Could not fetch {commodity}"}
 
 # ============================================
-# TRADING
+# FOREX TRADING
 # ============================================
 def get_paper_balance():
     bal = db.get_setting("forex_balance", "")
@@ -462,11 +527,230 @@ def monitor_paper_trades():
 
 def forex_report():
     s = db.get_forex_stats()
-    return (f"📊 PAPER TRADING\n"
-            f"Balance: ${get_paper_balance():.2f}\n"
-            f"PnL: ${s['total_pnl']:.2f}\n"
-            f"Trades: {s['total_trades']}\n"
+    return (f"📊 PAPER TRADING\nBalance: ${get_paper_balance():.2f}\n"
+            f"PnL: ${s['total_pnl']:.2f}\nTrades: {s['total_trades']}\n"
             f"Win Rate: {s['win_rate']:.1f}%")
+
+# ============================================
+# BLUESKY AUTO-ENGAGEMENT
+# ============================================
+def bluesky_login():
+    try:
+        r = requests.post(
+            "https://bsky.social/xrpc/com.atproto.server.createSession",
+            json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_PASSWORD}, timeout=15
+        )
+        if r.status_code == 200:
+            s = r.json()
+            return s["accessJwt"], s["did"]
+    except:
+        pass
+    return None, None
+
+def bluesky_search(term, limit=10):
+    jwt, _ = bluesky_login()
+    if not jwt:
+        return []
+    try:
+        r = requests.get(
+            "https://bsky.social/xrpc/app.bsky.feed.searchPosts",
+            headers={"Authorization": f"Bearer {jwt}"},
+            params={"q": term, "limit": limit}, timeout=15
+        )
+        if r.status_code == 200:
+            return r.json().get("posts", [])
+    except:
+        pass
+    return []
+
+def bluesky_follow(target_did):
+    jwt, my_did = bluesky_login()
+    if not jwt:
+        return False
+    try:
+        r = requests.post(
+            "https://bsky.social/xrpc/com.atproto.repo.createRecord",
+            headers={"Authorization": f"Bearer {jwt}"},
+            json={
+                "repo": my_did,
+                "collection": "app.bsky.graph.follow",
+                "record": {
+                    "$type": "app.bsky.graph.follow",
+                    "subject": target_did,
+                    "createdAt": datetime.now().isoformat() + "Z"
+                }
+            }, timeout=15
+        )
+        return r.status_code == 200
+    except:
+        return False
+
+def bluesky_like(post_uri, post_cid):
+    jwt, my_did = bluesky_login()
+    if not jwt:
+        return False
+    try:
+        r = requests.post(
+            "https://bsky.social/xrpc/com.atproto.repo.createRecord",
+            headers={"Authorization": f"Bearer {jwt}"},
+            json={
+                "repo": my_did,
+                "collection": "app.bsky.feed.like",
+                "record": {
+                    "$type": "app.bsky.feed.like",
+                    "subject": {"uri": post_uri, "cid": post_cid},
+                    "createdAt": datetime.now().isoformat() + "Z"
+                }
+            }, timeout=15
+        )
+        return r.status_code == 200
+    except:
+        return False
+
+def bluesky_reply(post_uri, post_cid, reply_text):
+    jwt, my_did = bluesky_login()
+    if not jwt:
+        return False
+    try:
+        r = requests.post(
+            "https://bsky.social/xrpc/com.atproto.repo.createRecord",
+            headers={"Authorization": f"Bearer {jwt}"},
+            json={
+                "repo": my_did,
+                "collection": "app.bsky.feed.post",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": reply_text[:300],
+                    "reply": {"root": {"uri": post_uri, "cid": post_cid},
+                              "parent": {"uri": post_uri, "cid": post_cid}},
+                    "createdAt": datetime.now().isoformat() + "Z"
+                }
+            }, timeout=15
+        )
+        return r.status_code == 200
+    except:
+        return False
+
+def run_bluesky_growth():
+    if not ENABLE_BLUESKY_GROWTH or not BLUESKY_HANDLE:
+        return
+    logger.info("🚀 Bluesky growth cycle...")
+    term = random.choice(NICHE_TERMS)
+    posts = bluesky_search(term, limit=15)
+    if not posts:
+        return
+    follows, likes, replies = 0, 0, 0
+    for post in posts:
+        try:
+            author_did = post.get("author", {}).get("did", "")
+            post_uri = post.get("uri", "")
+            post_cid = post.get("cid", "")
+            if not author_did or not post_uri:
+                continue
+            if follows < MAX_FOLLOWS_PER_CYCLE:
+                if bluesky_follow(author_did):
+                    follows += 1
+                    db.log_engagement("bluesky", "follow", author_did)
+            if likes < MAX_LIKES_PER_CYCLE:
+                if bluesky_like(post_uri, post_cid):
+                    likes += 1
+                    db.log_engagement("bluesky", "like", post_uri)
+            if replies < MAX_REPLIES_PER_CYCLE:
+                reply = ai_ask(f"Write a short, value-adding reply (under 100 chars) to: "
+                               f"'{post.get('record', {}).get('text', '')[:200]}'")
+                if "AI unavailable" not in reply:
+                    if bluesky_reply(post_uri, post_cid, reply):
+                        replies += 1
+                        db.log_engagement("bluesky", "reply", post_uri)
+            time.sleep(3)
+        except:
+            pass
+    logger.info(f"✅ Bluesky: {follows} follows, {likes} likes, {replies} replies")
+
+# ============================================
+# MASTODON AUTO-ENGAGEMENT
+# ============================================
+def mastodon_search(term, limit=10):
+    if not MASTODON_URL or not MASTODON_TOKEN:
+        return []
+    try:
+        r = requests.get(
+            f"{MASTODON_URL}/api/v2/search",
+            headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
+            params={"q": f"#{term}", "type": "statuses", "limit": limit}, timeout=15
+        )
+        if r.status_code == 200:
+            return r.json().get("statuses", [])
+    except:
+        pass
+    return []
+
+def mastodon_follow(account_id):
+    try:
+        r = requests.post(
+            f"{MASTODON_URL}/api/v1/accounts/{account_id}/follow",
+            headers={"Authorization": f"Bearer {MASTODON_TOKEN}"}, timeout=15
+        )
+        return r.status_code == 200
+    except:
+        return False
+
+def mastodon_like(status_id):
+    try:
+        r = requests.post(
+            f"{MASTODON_URL}/api/v1/statuses/{status_id}/favourite",
+            headers={"Authorization": f"Bearer {MASTODON_TOKEN}"}, timeout=15
+        )
+        return r.status_code == 200
+    except:
+        return False
+
+def mastodon_reply(status_id, reply_text):
+    try:
+        r = requests.post(
+            f"{MASTODON_URL}/api/v1/statuses",
+            headers={"Authorization": f"Bearer {MASTODON_TOKEN}"},
+            json={"status": reply_text[:300], "in_reply_to_id": status_id,
+                  "visibility": "public"}, timeout=15
+        )
+        return r.status_code == 200
+    except:
+        return False
+
+def run_mastodon_growth():
+    if not ENABLE_MASTODON_GROWTH or not MASTODON_TOKEN:
+        return
+    logger.info("🚀 Mastodon growth cycle...")
+    term = random.choice(NICHE_TERMS)
+    statuses = mastodon_search(term, limit=15)
+    if not statuses:
+        return
+    follows, likes, replies = 0, 0, 0
+    for status in statuses:
+        try:
+            account_id = status.get("account", {}).get("id", "")
+            status_id = status.get("id", "")
+            if not account_id or not status_id:
+                continue
+            if follows < MAX_FOLLOWS_PER_CYCLE:
+                if mastodon_follow(account_id):
+                    follows += 1
+                    db.log_engagement("mastodon", "follow", account_id)
+            if likes < MAX_LIKES_PER_CYCLE:
+                if mastodon_like(status_id):
+                    likes += 1
+                    db.log_engagement("mastodon", "like", status_id)
+            if replies < MAX_REPLIES_PER_CYCLE:
+                reply = ai_ask(f"Write a short, value-adding reply (under 100 chars) to: "
+                               f"'{status.get('content', '')[:200]}'")
+                if "AI unavailable" not in reply:
+                    if mastodon_reply(status_id, reply):
+                        replies += 1
+                        db.log_engagement("mastodon", "reply", status_id)
+            time.sleep(3)
+        except:
+            pass
+    logger.info(f"✅ Mastodon: {follows} follows, {likes} likes, {replies} replies")
 
 # ============================================
 # CONTENT GENERATION
@@ -479,6 +763,10 @@ def generate_content(topic, content_type="post", with_image=True):
         "post": f"Write an engaging social media post about: {topic}. Include hashtags."
     }
     body = ai_ask(prompts.get(content_type, prompts["post"]))
+
+    if content_type == "article":
+        body = inject_affiliate_links(body)
+
     img = ""
     if with_image and "AI unavailable" not in body:
         try:
@@ -489,7 +777,7 @@ def generate_content(topic, content_type="post", with_image=True):
     return {"topic": topic, "type": content_type, "body": body, "image_url": img}
 
 # ============================================
-# POSTING
+# SOCIAL POSTING
 # ============================================
 def track(platform, status, length):
     db.log_post(platform, status, length)
@@ -529,21 +817,16 @@ def post_to_discord(text, image_url=""):
         track("discord", "ok" if ok else "fail", len(text))
         return ok
     except:
-        track("discord", "fail", len(text))
         return False
 
 def post_to_bluesky(text, image_url=""):
     if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
         return False
     try:
-        r = requests.post(
-            "https://bsky.social/xrpc/com.atproto.server.createSession",
-            json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_PASSWORD}, timeout=15
-        )
-        if r.status_code != 200:
+        jwt, did = bluesky_login()
+        if not jwt:
             track("bluesky", "fail", len(text))
             return False
-        s = r.json()
         record = {"text": text[:300], "$type": "app.bsky.feed.post",
                   "createdAt": datetime.now().isoformat() + "Z"}
         if image_url:
@@ -552,7 +835,7 @@ def post_to_bluesky(text, image_url=""):
                 if ir.status_code == 200 and len(ir.content) > 1000:
                     up = requests.post(
                         "https://bsky.social/xrpc/com.atproto.repo.uploadBlob",
-                        headers={"Authorization": f"Bearer {s['accessJwt']}", "Content-Type": "image/png"},
+                        headers={"Authorization": f"Bearer {jwt}", "Content-Type": "image/png"},
                         data=ir.content, timeout=60
                     )
                     if up.status_code == 200:
@@ -562,14 +845,13 @@ def post_to_bluesky(text, image_url=""):
                 pass
         r2 = requests.post(
             "https://bsky.social/xrpc/com.atproto.repo.createRecord",
-            headers={"Authorization": f"Bearer {s['accessJwt']}"},
-            json={"repo": s["did"], "collection": "app.bsky.feed.post", "record": record}, timeout=30
+            headers={"Authorization": f"Bearer {jwt}"},
+            json={"repo": did, "collection": "app.bsky.feed.post", "record": record}, timeout=30
         )
         ok = r2.status_code == 200
         track("bluesky", "ok" if ok else "fail", len(text))
         return ok
     except:
-        track("bluesky", "fail", len(text))
         return False
 
 def post_to_mastodon(text, image_url=""):
@@ -603,7 +885,6 @@ def post_to_mastodon(text, image_url=""):
         track("mastodon", "ok" if ok else "fail", len(text))
         return ok
     except:
-        track("mastodon", "fail", len(text))
         return False
 
 def post_to_all_platforms(text, image_url=""):
@@ -704,14 +985,12 @@ def tg_poll():
                 params={"offset": offset + 1, "timeout": 20}, timeout=30
             )
             if r.status_code == 200:
-                data = r.json()
-                for update in data.get("result", []):
+                for update in r.json().get("result", []):
                     try:
                         offset = update["update_id"]
                         msg = update.get("message", {})
                         text = msg.get("text", "")
                         chat_id = str(msg.get("chat", {}).get("id", ""))
-
                         if "new_chat_members" in msg:
                             try:
                                 for member in msg["new_chat_members"]:
@@ -722,15 +1001,14 @@ def tg_poll():
                                               "text": f"👋 Welcome {name}! Type /start to see commands."},
                                         timeout=10
                                     )
-                            except Exception as we:
-                                logger.warning(f"Welcome failed: {we}")
-
+                            except:
+                                pass
                         if text:
                             handle_command(text, chat_id)
-                    except Exception as inner:
-                        logger.warning(f"Update processing error: {inner}")
-        except Exception as e:
-            logger.warning(f"TG poll error: {e}")
+                    except:
+                        pass
+        except:
+            pass
         time.sleep(2)
 
 def handle_command(text, chat_id):
@@ -739,21 +1017,45 @@ def handle_command(text, chat_id):
 
     try:
         if text == "/start":
-            tg_send(f"🤖 NOH4Q Agent v4D\n"
-                    f"Earned: ${db.total():.2f}\n"
-                    f"Balance: ${get_paper_balance():.2f}\n\n"
+            tg_send(f"🤖 NOH4Q Final Version\n"
+                    f"Earned: ${db.total():.2f} | Balance: ${get_paper_balance():.2f}\n\n"
                     f"📖 /blog <topic> - publish article\n"
                     f"📱 /post <topic> <type> - social post\n"
                     f"💱 /forex - live prices\n"
                     f"📊 /analytics - platform stats\n"
+                    f"📈 /growth - engagement stats\n"
+                    f"💰 /affiliate - affiliate status\n"
                     f"📝 /queue <topic> - add topic\n"
                     f"📭 /pending - view queue\n"
                     f"💰 /balance - paper balance\n"
                     f"📈 /fxreport - trading stats\n"
-                    f"ℹ️ /platforms, /ai, /help")
+                    f"ℹ️ /platforms, /ai")
 
-        elif text == "/help":
-            tg_send("Type /start to see all commands.")
+        elif text == "/affiliate":
+            status = "💰 AFFILIATE STATUS\n━━━━━━━━━━━━━━━━━━━\n"
+            status += f"Amazon: {'✅ ' + AMAZON_AFFILIATE_TAG if AMAZON_AFFILIATE_TAG else '❌ Not set'}\n"
+            status += f"ClickBank: {'✅ ' + CLICKBANK_AFFILIATE_ID if CLICKBANK_AFFILIATE_ID else '❌ Not set'}\n"
+            tg_send(status)
+
+        elif text == "/growth":
+            stats = db.get_engagement_stats()
+            if not stats:
+                tg_send("📈 No engagement yet.")
+                return
+            msg = "📈 ENGAGEMENT\n━━━━━━━━━━━━━━━━━━━\n"
+            for s in stats:
+                msg += f"{s['platform']} - {s['action']}: {s['count']}\n"
+            tg_send(msg)
+
+        elif text == "/bluesky_grow":
+            tg_send("🚀 Running Bluesky growth...")
+            run_bluesky_growth()
+            tg_send("✅ Done. Check /growth")
+
+        elif text == "/mastodon_grow":
+            tg_send("🚀 Running Mastodon growth...")
+            run_mastodon_growth()
+            tg_send("✅ Done. Check /growth")
 
         elif text == "/analytics":
             summary = db.get_analytics_summary()
@@ -762,9 +1064,7 @@ def handle_command(text, chat_id):
                 return
             msg = "📊 ANALYTICS\n━━━━━━━━━━━━━━━━━━━\n"
             for s in summary:
-                msg += f"\n{s['platform'].upper()}\n"
-                msg += f"  Total: {s['total']} | ✅ {s['success']} | ❌ {s['fail']}\n"
-                msg += f"  Rate: {s['success_rate']:.1f}%\n"
+                msg += f"{s['platform'].upper()}: {s['success']}/{s['total']} ({s['success_rate']:.0f}%)\n"
             tg_send(msg)
 
         elif text.startswith("/queue "):
@@ -772,15 +1072,13 @@ def handle_command(text, chat_id):
             if topic:
                 db.add_to_queue(topic, "post")
                 tg_send(f"✅ Queued: '{topic}'")
-            else:
-                tg_send("Usage: /queue <topic>")
 
         elif text == "/pending":
             items = db.get_queue()
             if not items:
-                tg_send("📭 Queue is empty")
+                tg_send("📭 Queue empty")
             else:
-                msg = f"📝 QUEUE ({len(items)} items)\n"
+                msg = f"📝 QUEUE ({len(items)})\n"
                 for i, item in enumerate(items[:20], 1):
                     msg += f"  {i}. {item[1]}\n"
                 tg_send(msg)
@@ -796,8 +1094,7 @@ def handle_command(text, chat_id):
                     f"FOREX: ✅")
 
         elif text == "/ai":
-            tg_send(f"🧠 AI:\n"
-                    f"Gemini: {'✅' if GEMINI_KEY else '❌'}\n"
+            tg_send(f"🧠 AI:\nGemini: {'✅' if GEMINI_KEY else '❌'}\n"
                     f"OpenRouter: {'✅' if OPENROUTER_KEY else '❌'}\n"
                     f"Cohere: {'✅' if COHERE_KEY else '❌'}\n"
                     f"HuggingFace: {'✅' if HF_KEY else '❌'}")
@@ -815,14 +1112,6 @@ def handle_command(text, chat_id):
                     msg += f"  {c}: ${d['price']:,.2f}\n"
             tg_send(msg)
 
-        elif text.startswith("/trade "):
-            asset = text[7:].strip().upper().replace("-", "/")
-            t = execute_paper_trade(asset)
-            if t:
-                tg_send(f"✅ Opened {t['side'].upper()} {t['pair']} @ {t['price']:.5f}")
-            else:
-                tg_send(f"⏸️ No signal for {asset}")
-
         elif text == "/balance":
             tg_send(f"💰 Balance: ${get_paper_balance():.2f}")
 
@@ -834,16 +1123,12 @@ def handle_command(text, chat_id):
 
         elif text.startswith("/post "):
             parts = text[6:].strip().split()
-            if len(parts) < 2:
-                tg_send("Usage: /post <topic> <type>")
-            else:
+            if len(parts) >= 2:
                 topic = " ".join(parts[:-1])
                 ctype = parts[-1]
-                tg_send(f"🎨 Generating...")
+                tg_send("🎨 Generating...")
                 r = generate_content(topic, ctype, with_image=True)
-                if "AI unavailable" in r['body']:
-                    tg_send("❌ AI failed.")
-                else:
+                if "AI unavailable" not in r['body']:
                     results = post_to_all_platforms(r['body'], r['image_url'])
                     ok = sum(1 for v in results.values() if v)
                     tg_send(f"✅ Posted to {ok}/4 platforms")
@@ -852,9 +1137,7 @@ def handle_command(text, chat_id):
             topic = text[6:].strip()
             tg_send(f"📝 Writing '{topic}'...")
             r = generate_content(topic, "article", with_image=False)
-            if "AI unavailable" in r['body']:
-                tg_send("❌ AI failed.")
-            else:
+            if "AI unavailable" not in r['body']:
                 pub = publish_article(topic, r['body'])
                 msg = "✅ Published!\n"
                 if pub['telegraph']:
@@ -866,19 +1149,15 @@ def handle_command(text, chat_id):
         elif text.startswith("/price "):
             sym = text[7:].strip().upper()
             r = get_crypto_price(sym)
-            if "error" in r:
-                tg_send(f"❌ {r['error']}")
-            else:
+            if "error" not in r:
                 tg_send(f"💰 {r['symbol']}: ${r['price']:,.2f}")
 
         else:
             tg_send("💭 Thinking...")
-            reply = ai_ask(
-                f"You are NOH4Q, an AI agent. Reply helpfully and concisely (under 200 chars) to: {text}"
-            )
+            reply = ai_ask(f"You are NOH4Q, an AI agent. Reply concisely (under 200 chars) to: {text}")
             tg_send(reply[:500])
     except Exception as e:
-        logger.warning(f"Command handling error: {e}")
+        logger.warning(f"Command error: {e}")
 
 # ============================================
 # WORK LOOP
@@ -890,57 +1169,51 @@ def work_loop():
             cycle_count += 1
             logger.info(f"🔄 Cycle {cycle_count} starting...")
 
-            # 1. Crypto
+            # Crypto + prices
             price = get_crypto_price("BTC")
-
-            # 2. Prices
             for p in FOREX_PAIRS:
                 get_forex_price(p)
             for c in COMMODITY_MAP.keys():
                 get_commodity_price(c)
 
-            # 3. Auto-trade
+            # Auto-trade
             execute_paper_trade("EUR/USD")
             execute_paper_trade("XAU/USD")
             closed = monitor_paper_trades()
 
-            # 4. Check queue
-            queued = db.pop_queue()
-            if queued:
-                topic = queued["topic"]
-                logger.info(f"📝 Queued topic: {topic}")
-            else:
-                topic = random.choice(["crypto trading", "AI automation", "passive income", "gold investing"])
+            # Growth cycles every 2 cycles
+            if cycle_count % 2 == 0:
+                try:
+                    run_bluesky_growth()
+                except:
+                    pass
+                try:
+                    run_mastodon_growth()
+                except:
+                    pass
 
-            # 5. Social content
+            # Content
+            queued = db.pop_queue()
+            topic = queued["topic"] if queued else random.choice(
+                ["crypto trading", "AI automation", "passive income", "gold investing"]
+            )
+
             content = generate_content(topic, "post", with_image=True)
             if "AI unavailable" not in content['body']:
                 post_to_all_platforms(content['body'], content['image_url'])
 
-            # 6. Blog
             article = generate_content(topic, "article", with_image=False)
             if "AI unavailable" not in article['body']:
                 pub = publish_article(topic, article['body'])
                 if pub['telegraph']:
                     tg_send(f"📖 New article: {pub['telegraph']}")
 
-            # 7. Notify trades
             if closed:
                 tg_send(f"📉 Closed: {closed['side'].upper()} {closed['pair']} PnL: ${closed['pnl']:.2f}")
 
-            # 8. Summary
+            # Summary
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
             tg_send(f"💼 Cycle {cycle_count} done. BTC: ${price.get('price', 0):,.2f} | Balance: ${get_paper_balance():.2f}")
-
-            # 9. Weekly report every 42 cycles
-            if cycle_count % 42 == 0:
-                summary = db.get_analytics_summary()
-                msg = f"📊 WEEKLY REPORT\n━━━━━━━━━━━━━━━━━━━\n"
-                for s in summary:
-                    msg += f"{s['platform']}: {s['success']}/{s['total']} ({s['success_rate']:.0f}%)\n"
-                msg += f"\nEarned: ${db.total():.2f}\n"
-                msg += f"Balance: ${get_paper_balance():.2f}\n"
-                tg_send(msg)
 
             time.sleep(14400)
         except Exception as e:
@@ -955,9 +1228,9 @@ app = Flask(__name__)
 @app.route("/")
 def home():
     try:
-        return f"<h1>🤖 NOH4Q Agent v4D</h1><p>Earned: ${db.total():.2f}</p>"
+        return f"<h1>🤖 NOH4Q Final</h1><p>Earned: ${db.total():.2f}</p>"
     except:
-        return "<h1>🤖 NOH4Q Agent</h1>"
+        return "<h1>🤖 NOH4Q</h1>"
 
 @app.route("/health")
 def health():
@@ -973,31 +1246,37 @@ def api_status():
             "alive": True,
             "earned": db.total(),
             "forex": db.get_forex_stats(),
-            "analytics": db.get_analytics_summary()
+            "engagement": db.get_engagement_stats(),
+            "affiliates": {
+                "amazon": AMAZON_AFFILIATE_TAG or None,
+                "clickbank": CLICKBANK_AFFILIATE_ID or None
+            }
         })
-    except Exception as e:
-        return jsonify({"alive": True, "error": str(e)})
+    except:
+        return jsonify({"alive": True})
 
 # ============================================
 # SAFE START
 # ============================================
 def safe_start():
-    """Start background threads safely with error handling."""
     try:
         threading.Thread(target=tg_poll, daemon=True).start()
         logger.info("✅ Telegram poller started")
     except Exception as e:
-        logger.error(f"❌ tg_poll failed to start: {e}")
+        logger.error(f"❌ tg_poll failed: {e}")
 
     try:
         threading.Thread(target=work_loop, daemon=True).start()
         logger.info("✅ Work loop started")
     except Exception as e:
-        logger.error(f"❌ work_loop failed to start: {e}")
+        logger.error(f"❌ work_loop failed: {e}")
 
-    logger.info("🚀 NOH4Q Phase 4D ready")
+    logger.info("🚀 NOH4Q FINAL ready")
+    if AMAZON_AFFILIATE_TAG:
+        logger.info(f"💰 Amazon tag: {AMAZON_AFFILIATE_TAG}")
+    if CLICKBANK_AFFILIATE_ID:
+        logger.info(f"💰 ClickBank ID: {CLICKBANK_AFFILIATE_ID}")
 
-# Start threads at import time (works with gunicorn)
 safe_start()
 
 if __name__ == "__main__":
