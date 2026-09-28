@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-NOH4Q AGENT - FINAL VERSION
+NOH4Q AGENT - FINAL VERSION (Clean Writing + Working Links)
 Social: Telegram + Discord + Bluesky + Mastodon
-Blogs: Telegraph + Beehiiv (with affiliate injection)
-Trading: FOREX + Commodities (Gold, Silver, Oil)
-Features: Analytics + Queue + Auto-Reply + Growth Engine
+Blogs: Telegraph + Beehiiv (with clickable affiliate links)
+Trading: FOREX + Commodities
+Features: Analytics + Queue + Auto-Reply + Growth
 Affiliates: Amazon + ClickBank
 """
 
 import os
+import re
 import json
 import logging
 import threading
@@ -38,18 +39,15 @@ MASTODON_TOKEN = os.getenv("MASTODON_TOKEN", "")
 BEEHIIV_API_KEY = os.getenv("BEEHIIV_API_KEY", "")
 BEEHIIV_PUBLICATION_ID = os.getenv("BEEHIIV_PUBLICATION_ID", "")
 
-# Affiliate IDs
 AMAZON_AFFILIATE_TAG = os.getenv("AMAZON_AFFILIATE_TAG", "")
 CLICKBANK_AFFILIATE_ID = os.getenv("CLICKBANK_AFFILIATE_ID", "")
 
-# Growth config
 ENABLE_BLUESKY_GROWTH = os.getenv("ENABLE_BLUESKY_GROWTH", "true").lower() == "true"
 ENABLE_MASTODON_GROWTH = os.getenv("ENABLE_MASTODON_GROWTH", "true").lower() == "true"
 MAX_FOLLOWS_PER_CYCLE = int(os.getenv("MAX_FOLLOWS_PER_CYCLE", "20"))
 MAX_LIKES_PER_CYCLE = int(os.getenv("MAX_LIKES_PER_CYCLE", "30"))
 MAX_REPLIES_PER_CYCLE = int(os.getenv("MAX_REPLIES_PER_CYCLE", "5"))
 
-# FOREX config
 FOREX_START_BALANCE = float(os.getenv("FOREX_START_BALANCE", "1000"))
 FOREX_RISK_PER_TRADE = float(os.getenv("FOREX_RISK_PER_TRADE", "2"))
 FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CHF"]
@@ -330,6 +328,20 @@ def ai_ask(prompt):
     return "AI unavailable"
 
 # ============================================
+# TEXT CLEANER (removes AI's markdown symbols)
+# ============================================
+def clean_ai_text(text):
+    """Remove markdown symbols from AI output for natural prose."""
+    if not text:
+        return text
+    # Remove ** and * from text (AI sometimes adds them even when told not to)
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # **bold** → bold
+    text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'\1', text)  # *italic* → italic
+    # Remove leftover ** or * 
+    text = text.replace('**', '').replace('##', '')
+    return text
+
+# ============================================
 # AFFILIATE LINK INJECTION
 # ============================================
 AMAZON_PRODUCT_KEYWORDS = {
@@ -344,32 +356,34 @@ AMAZON_PRODUCT_KEYWORDS = {
     "investing book": "https://www.amazon.com/s?k=investing+books&tag=",
     "ai software": "https://www.amazon.com/s?k=ai+software&tag=",
     "bitcoin book": "https://www.amazon.com/s?k=bitcoin+books&tag=",
+    "ledger nano": "https://www.amazon.com/s?k=ledger+nano&tag=",
+    "trezor wallet": "https://www.amazon.com/s?k=trezor+wallet&tag=",
+    "hardware wallet": "https://www.amazon.com/s?k=hardware+wallet&tag=",
 }
 
 def inject_affiliate_links(text):
     """Inject affiliate links into text."""
     result = text
 
-    # Amazon links
     if AMAZON_AFFILIATE_TAG:
         for keyword, base_url in AMAZON_PRODUCT_KEYWORDS.items():
             if keyword.lower() in result.lower():
                 full_url = base_url + AMAZON_AFFILIATE_TAG
+                # Use [keyword](url) format so Telegraph renders as clickable link
                 result = result.replace(
                     keyword,
-                    f"{keyword} ([check here]({full_url}))",
+                    f"[{keyword}]({full_url})",
                     1
                 )
 
-    # ClickBank links
     if CLICKBANK_AFFILIATE_ID:
-        cb_keywords = ["make money online", "passive income course", "trading course"]
+        cb_keywords = ["make money online", "passive income course"]
         for kw in cb_keywords:
             if kw.lower() in result.lower():
                 hoplink = f"https://hop.clickbank.net/?affiliate={CLICKBANK_AFFILIATE_ID}"
                 result = result.replace(
                     kw,
-                    f"{kw} ([see here]({hoplink}))",
+                    f"[{kw}]({hoplink})",
                     1
                 )
 
@@ -386,10 +400,10 @@ def generate_image_url(prompt, width=1024, height=1024):
         return ""
 
 def create_image_prompt(topic, body):
-    p = ai_ask(f"Create a short 15-word vivid image description for: {topic}. Only the description.")
+    p = ai_ask(f"Create a short 15-word vivid image description for: {topic}. Only the description, no formatting.")
     if "AI unavailable" in p:
         p = f"Digital art of {topic}, modern, vibrant"
-    return p.strip()[:200]
+    return clean_ai_text(p.strip())[:200]
 
 # ============================================
 # MARKET DATA
@@ -656,8 +670,9 @@ def run_bluesky_growth():
                     likes += 1
                     db.log_engagement("bluesky", "like", post_uri)
             if replies < MAX_REPLIES_PER_CYCLE:
-                reply = ai_ask(f"Write a short, value-adding reply (under 100 chars) to: "
+                reply = ai_ask(f"Write a short, value-adding reply (under 100 chars, no formatting symbols) to: "
                                f"'{post.get('record', {}).get('text', '')[:200]}'")
+                reply = clean_ai_text(reply)
                 if "AI unavailable" not in reply:
                     if bluesky_reply(post_uri, post_cid, reply):
                         replies += 1
@@ -741,8 +756,9 @@ def run_mastodon_growth():
                     likes += 1
                     db.log_engagement("mastodon", "like", status_id)
             if replies < MAX_REPLIES_PER_CYCLE:
-                reply = ai_ask(f"Write a short, value-adding reply (under 100 chars) to: "
+                reply = ai_ask(f"Write a short, value-adding reply (under 100 chars, no formatting) to: "
                                f"'{status.get('content', '')[:200]}'")
+                reply = clean_ai_text(reply)
                 if "AI unavailable" not in reply:
                     if mastodon_reply(status_id, reply):
                         replies += 1
@@ -753,17 +769,36 @@ def run_mastodon_growth():
     logger.info(f"✅ Mastodon: {follows} follows, {likes} likes, {replies} replies")
 
 # ============================================
-# CONTENT GENERATION
+# CONTENT GENERATION (with cleaning)
 # ============================================
 def generate_content(topic, content_type="post", with_image=True):
+    # Prompts explicitly tell AI to avoid markdown symbols
     prompts = {
-        "article": f"Write a 400-word article about: {topic}. Use headings, short paragraphs, conclusion.",
-        "tweet_thread": f"Write a 3-tweet thread about: {topic}. Each under 280 chars.",
-        "script": f"Write a 30-second video script about: {topic}.",
-        "post": f"Write an engaging social media post about: {topic}. Include hashtags."
+        "article": (
+            f"Write a 400-word article about: {topic}. "
+            f"IMPORTANT: Do NOT use markdown symbols like ** or ## or *. "
+            f"Write in clean, natural prose with plain paragraphs. "
+            f"Use short sentences. End with a conclusion paragraph."
+        ),
+        "tweet_thread": (
+            f"Write a 3-tweet thread about: {topic}. Each tweet under 280 chars. "
+            f"Do NOT use ** or markdown. Write plain text only."
+        ),
+        "script": (
+            f"Write a 30-second video script about: {topic}. "
+            f"Do NOT use ** or markdown symbols. Plain text only."
+        ),
+        "post": (
+            f"Write an engaging social media post about: {topic}. "
+            f"Include 3-5 hashtags. Do NOT use ** or markdown. Plain text only."
+        ),
     }
     body = ai_ask(prompts.get(content_type, prompts["post"]))
-
+    
+    # Clean the AI output
+    body = clean_ai_text(body)
+    
+    # Inject affiliate links into articles
     if content_type == "article":
         body = inject_affiliate_links(body)
 
@@ -896,6 +931,63 @@ def post_to_all_platforms(text, image_url=""):
     }
 
 # ============================================
+# MARKDOWN PARSER FOR TELEGRAPH (with clickable links)
+# ============================================
+def parse_inline(text):
+    """Parse inline markdown: [text](url), **bold**, *italic*."""
+    parts = []
+    pattern = re.compile(
+        r'\[([^\]]+)\]\(([^)]+)\)'   # [text](url)
+        r'|\*\*([^*]+)\*\*'          # **bold**
+        r'|\*([^*]+)\*'              # *italic*
+    )
+    pos = 0
+    for match in pattern.finditer(text):
+        if match.start() > pos:
+            parts.append(text[pos:match.start()])
+        if match.group(1) and match.group(2):
+            parts.append({
+                "tag": "a",
+                "attrs": {"href": match.group(2)},
+                "children": [match.group(1)]
+            })
+        elif match.group(3):
+            parts.append({
+                "tag": "strong",
+                "children": [match.group(3)]
+            })
+        elif match.group(4):
+            parts.append({
+                "tag": "em",
+                "children": [match.group(4)]
+            })
+        pos = match.end()
+    if pos < len(text):
+        parts.append(text[pos:])
+    return parts if parts else [text]
+
+def md_to_nodes(text):
+    """Convert text to Telegraph nodes with inline links."""
+    nodes = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("### "):
+            nodes.append({"tag": "h4", "children": parse_inline(line[4:])})
+        elif line.startswith("## "):
+            nodes.append({"tag": "h3", "children": parse_inline(line[3:])})
+        elif line.startswith("# "):
+            nodes.append({"tag": "h3", "children": parse_inline(line[2:])})
+        elif line.startswith("- ") or line.startswith("* "):
+            nodes.append({"tag": "ul", "children": [
+                {"tag": "li", "children": parse_inline(line[2:])}
+            ]})
+        else:
+            nodes.append({"tag": "p", "children": parse_inline(line)})
+    return nodes
+
+# ============================================
 # TELEGRAPH + BEEHIIV
 # ============================================
 def get_telegraph_token():
@@ -912,20 +1004,6 @@ def get_telegraph_token():
     except:
         pass
     return ""
-
-def md_to_nodes(text):
-    nodes = []
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith(("# ", "## ", "### ")):
-            nodes.append({"tag": "h3", "children": [line.lstrip("# ").strip()]})
-        elif line.startswith(("- ", "* ")):
-            nodes.append({"tag": "ul", "children": [{"tag": "li", "children": [line[2:]]}]})
-        else:
-            nodes.append({"tag": "p", "children": [line]})
-    return nodes
 
 def publish_to_telegraph(title, body):
     token = get_telegraph_token()
@@ -1017,7 +1095,7 @@ def handle_command(text, chat_id):
 
     try:
         if text == "/start":
-            tg_send(f"🤖 NOH4Q Final Version\n"
+            tg_send(f"🤖 NOH4Q Final\n"
                     f"Earned: ${db.total():.2f} | Balance: ${get_paper_balance():.2f}\n\n"
                     f"📖 /blog <topic> - publish article\n"
                     f"📱 /post <topic> <type> - social post\n"
@@ -1154,7 +1232,8 @@ def handle_command(text, chat_id):
 
         else:
             tg_send("💭 Thinking...")
-            reply = ai_ask(f"You are NOH4Q, an AI agent. Reply concisely (under 200 chars) to: {text}")
+            reply = ai_ask(f"You are NOH4Q, an AI agent. Reply concisely (under 200 chars, plain text, no markdown) to: {text}")
+            reply = clean_ai_text(reply)
             tg_send(reply[:500])
     except Exception as e:
         logger.warning(f"Command error: {e}")
@@ -1169,19 +1248,16 @@ def work_loop():
             cycle_count += 1
             logger.info(f"🔄 Cycle {cycle_count} starting...")
 
-            # Crypto + prices
             price = get_crypto_price("BTC")
             for p in FOREX_PAIRS:
                 get_forex_price(p)
             for c in COMMODITY_MAP.keys():
                 get_commodity_price(c)
 
-            # Auto-trade
             execute_paper_trade("EUR/USD")
             execute_paper_trade("XAU/USD")
             closed = monitor_paper_trades()
 
-            # Growth cycles every 2 cycles
             if cycle_count % 2 == 0:
                 try:
                     run_bluesky_growth()
@@ -1192,7 +1268,6 @@ def work_loop():
                 except:
                     pass
 
-            # Content
             queued = db.pop_queue()
             topic = queued["topic"] if queued else random.choice(
                 ["crypto trading", "AI automation", "passive income", "gold investing"]
@@ -1211,7 +1286,6 @@ def work_loop():
             if closed:
                 tg_send(f"📉 Closed: {closed['side'].upper()} {closed['pair']} PnL: ${closed['pnl']:.2f}")
 
-            # Summary
             db.earn("daily_task", round(random.uniform(0.01, 0.10), 4))
             tg_send(f"💼 Cycle {cycle_count} done. BTC: ${price.get('price', 0):,.2f} | Balance: ${get_paper_balance():.2f}")
 
@@ -1273,9 +1347,9 @@ def safe_start():
 
     logger.info("🚀 NOH4Q FINAL ready")
     if AMAZON_AFFILIATE_TAG:
-        logger.info(f"💰 Amazon tag: {AMAZON_AFFILIATE_TAG}")
+        logger.info(f"💰 Amazon: {AMAZON_AFFILIATE_TAG}")
     if CLICKBANK_AFFILIATE_ID:
-        logger.info(f"💰 ClickBank ID: {CLICKBANK_AFFILIATE_ID}")
+        logger.info(f"💰 ClickBank: {CLICKBANK_AFFILIATE_ID}")
 
 safe_start()
 
