@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""
-NOH4Q AGENT - FINAL VERSION (Clean Writing + Working Links)
-Social: Telegram + Discord + Bluesky + Mastodon
-Blogs: Telegraph + Beehiiv (with clickable affiliate links)
-Trading: FOREX + Commodities#!/usr/bin/env python3
-"""
+# NOH4Q AGENT - PHASE 5 FINAL
+# Text + Images + Audio (Podcast) + Video
+# Social: Telegram + Discord + Bluesky + Mastodon
+# Blogs: Telegraph + Beehiiv (with clickable affiliate links)
+# Trading: FOREX + Commodities
+# Affiliates: Amazon + ClickBank
 NOH4Q AGENT - PHASE 5 FINAL
 Text + Images + Audio (Podcast) + Video
 Social: Telegram + Discord + Bluesky + Mastodon
