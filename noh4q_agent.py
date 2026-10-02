@@ -501,28 +501,29 @@ def generate_rss_feed():
     
     # Placeholder cover art (1400x1400 minimum for Spotify)
     cover_art_url = "https://placehold.co/1400x1400/png?text=NOH4Q+Podcast"
-    owner_email = "noh4qq@gmail.com" # Change this to your email if you want
+    owner_email = "noh4qq@gmail.com"
 
-    rss = """<?xml version="1.0" encoding="UTF-8"?>
+    rss_template = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
     <channel>
         <title>NOH4Q Daily Insights</title>
         <description>AI-generated insights on crypto, AI, and passive income.</description>
-        <link>""" + RSS_BASE_URL + """</link>
+        <link>{base_url}</link>
         <language>en-us</language>
         <itunes:author>NOH4Q Agent</itunes:author>
         <itunes:category text="Business"/>
         <itunes:explicit>no</itunes:explicit>
-        <itunes:image href="""" + cover_art_url + """" />
-        <itunes:email>""" + owner_email + """</itunes:email>
+        <itunes:image href="{cover_art}" />
+        <itunes:email>{email}</itunes:email>
         <itunes:owner>
             <itunes:name>NOH4Q Agent</itunes:name>
-            <itunes:email>""" + owner_email + """</itunes:email>
+            <itunes:email>{email}</itunes:email>
         </itunes:owner>
-        """ + items + """
+        {items}
     </channel>
 </rss>"""
-    return rss
+    
+    return rss_template.format(base_url=RSS_BASE_URL, cover_art=cover_art_url, email=owner_email, items=items)
 
 # PHASE 6: INTERACTIVE CONTENT
 def generate_quiz(topic, num_questions=5):
@@ -1182,6 +1183,14 @@ def handle_command(text, chat_id):
                 tg_send("Newsletter sent to " + str(result["sent"]) + "/" + str(result["total"]) + " subscribers.")
             else:
                 tg_send("Failed to generate newsletter content.")
+
+        elif text == "/test_facebook":
+            tg_send("Testing Facebook...")
+            success = post_to_facebook("Test post from NOH4Q Agent!", "")
+            if success:
+                tg_send("✅ Facebook post successful!")
+            else:
+                tg_send("❌ Facebook post failed. Check Render logs.")
 
         else:
             tg_send("Thinking...")
