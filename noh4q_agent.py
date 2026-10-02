@@ -513,7 +513,7 @@ def generate_rss_feed():
         <itunes:author>NOH4Q Agent</itunes:author>
         <itunes:category text="Business"/>
         <itunes:explicit>no</itunes:explicit>
-        <itunes:image href=" """ + cover_art_url + """ " />
+        <itunes:image href="""" + cover_art_url + """" />
         <itunes:email>""" + owner_email + """</itunes:email>
         <itunes:owner>
             <itunes:name>NOH4Q Agent</itunes:name>
