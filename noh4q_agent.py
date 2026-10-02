@@ -16,7 +16,7 @@ import asyncio
 import subprocess
 import tempfile
 from datetime import datetime
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 
 try:
     import edge_tts
@@ -57,10 +57,10 @@ YOUTUBE_REFRESH_TOKEN = os.getenv("YOUTUBE_REFRESH_TOKEN", "")
 
 # PHASE 7: Email (via Resend or SMTP)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "agent@yourdomain.com")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "onboarding@resend.dev")
 
 # PHASE 5B: RSS Feed
-RSS_BASE_URL = os.getenv("RSS_BASE_URL", "https://your-agent.onrender.com")
+RSS_BASE_URL = os.getenv("RSS_BASE_URL", "https://noh4q-agent.onrender.com")
 
 # Existing config
 ENABLE_BLUESKY_GROWTH = os.getenv("ENABLE_BLUESKY_GROWTH", "true").lower() == "true"
@@ -456,17 +456,24 @@ def generate_podcast(topic, voice="en-US-AriaNeural"):
         if "AI unavailable" in script:
             return None
 
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        tmp.close()
-        audio_path = generate_audio(script, tmp.name, voice)
-        if not audio_path:
+        # Create a public audio directory
+        os.makedirs("audio", exist_ok=True)
+        filename = "podcast_" + str(int(time.time())) + ".mp3"
+        audio_path = os.path.join("audio", filename)
+        
+        # Generate audio to the public path
+        audio_file = generate_audio(script, audio_path, voice)
+        if not audio_file:
             return None
 
+        # Create the public URL
+        public_url = RSS_BASE_URL.rstrip('/') + "/audio/" + filename
+
         # Save to database
-        db.save_content(topic, "podcast", script, audio_path)
-        db.save_podcast("Podcast: " + topic, script[:200], audio_path, 120)
+        db.save_content(topic, "podcast", script, audio_file)
+        db.save_podcast("Podcast: " + topic, script[:200], public_url, 120)
         
-        return {"topic": topic, "script": script, "audio": audio_path}
+        return {"topic": topic, "script": script, "audio": audio_file, "public_url": public_url}
     except Exception as e:
         logger.error("Podcast generation failed: " + str(e))
         return None
@@ -485,13 +492,17 @@ def generate_rss_feed():
         <item>
             <title><![CDATA[""" + title + """]]></title>
             <description><![CDATA[""" + desc + """]]></description>
-            <enclosure url=" """ + url + """ " length="0" type="audio/mpeg"/>
+            <enclosure url=\"""" + url + """\" length="0" type="audio/mpeg"/>
             <guid>""" + url + """</guid>
             <pubDate>""" + pub_formatted + """</pubDate>
             <itunes:duration>""" + str(dur) + """</itunes:duration>
         </item>
         """
     
+    # Placeholder cover art (1400x1400 minimum for Spotify)
+    cover_art_url = "https://placehold.co/1400x1400/png?text=NOH4Q+Podcast"
+    owner_email = "noh4qq@gmail.com" # Change this to your email if you want
+
     rss = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
     <channel>
@@ -502,6 +513,12 @@ def generate_rss_feed():
         <itunes:author>NOH4Q Agent</itunes:author>
         <itunes:category text="Business"/>
         <itunes:explicit>no</itunes:explicit>
+        <itunes:image href=" """ + cover_art_url + """ " />
+        <itunes:email>""" + owner_email + """</itunes:email>
+        <itunes:owner>
+            <itunes:name>NOH4Q Agent</itunes:name>
+            <itunes:email>""" + owner_email + """</itunes:email>
+        </itunes:owner>
         """ + items + """
     </channel>
 </rss>"""
@@ -1146,6 +1163,26 @@ def handle_command(text, chat_id):
             if "error" not in r:
                 tg_send(r["symbol"] + ": $" + str(round(r["price"], 2)))
 
+        elif text.startswith("/subscribe "):
+            email = text[11:].strip()
+            if "@" in email:
+                if db.add_subscriber(email):
+                    tg_send("Subscribed: " + email)
+                else:
+                    tg_send("Failed to subscribe.")
+            else:
+                tg_send("Invalid email.")
+
+        elif text.startswith("/newsletter "):
+            subject = text[12:].strip()
+            tg_send("Generating newsletter...")
+            content_res = generate_content(subject, "article", with_image=False)
+            if "AI unavailable" not in content_res["body"]:
+                result = send_newsletter(subject, content_res["body"])
+                tg_send("Newsletter sent to " + str(result["sent"]) + "/" + str(result["total"]) + " subscribers.")
+            else:
+                tg_send("Failed to generate newsletter content.")
+
         else:
             tg_send("Thinking...")
             reply = ai_ask("You are NOH4Q. Reply concisely (under 200 chars, plain text) to: " + text)
@@ -1409,6 +1446,10 @@ def health():
 @app.route("/rss.xml")
 def rss():
     return generate_rss_feed(), 200, {"Content-Type": "application/rss+xml; charset=utf-8"}
+
+@app.route("/audio/<filename>")
+def serve_audio(filename):
+    return send_from_directory("audio", filename)
 
 @app.route("/api/status")
 def api_status():
