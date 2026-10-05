@@ -848,10 +848,16 @@ def post_to_facebook(text, image_url=""):
                 params={"message": text, "access_token": FACEBOOK_PAGE_TOKEN},
                 timeout=30
             )
-        ok = r.status_code == 200
-        track("facebook", "ok" if ok else "fail", len(text))
-        return ok
-    except Exception:
+        
+        if r.status_code != 200:
+            logger.error("Facebook API Error: " + r.text) # <-- THIS WILL SHOW THE ERROR
+            track("facebook", "fail", len(text))
+            return False
+            
+        track("facebook", "ok", len(text))
+        return True
+    except Exception as e:
+        logger.error("Facebook Request Failed: " + str(e)) # <-- THIS WILL SHOW THE ERROR
         return False
 
 def post_to_all_platforms(text, image_url=""):
