@@ -836,16 +836,18 @@ def post_to_facebook(text, image_url=""):
     if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_TOKEN:
         return False
     try:
+        # Use v20.0 API version (current stable version) and data= instead of params=
+        url = "https://graph.facebook.com/v20.0/" + FACEBOOK_PAGE_ID
         if image_url:
             r = requests.post(
-                "https://graph.facebook.com/v25.0/" + FACEBOOK_PAGE_ID + "/photos",
-                params={"url": image_url, "caption": text[:2000], "access_token": FACEBOOK_PAGE_TOKEN},
+                url + "/photos",
+                data={"url": image_url, "caption": text[:2000], "access_token": FACEBOOK_PAGE_TOKEN},
                 timeout=60
             )
         else:
             r = requests.post(
-                "https://graph.facebook.com/v25.0/" + FACEBOOK_PAGE_ID + "/feed",
-                params={"message": text, "access_token": FACEBOOK_PAGE_TOKEN},
+                url + "/feed",
+                data={"message": text, "access_token": FACEBOOK_PAGE_TOKEN},
                 timeout=30
             )
         
